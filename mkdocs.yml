@@ -25,7 +25,6 @@ nav:
   - Overview: index.md
   - Getting Started: getting-started.md
   - Usage: usage.md
-  - Web UI: ui.md
   - Architecture: architecture.md
   - Configuration: configuration.md
   - Outputs: outputs.md

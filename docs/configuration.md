@@ -49,4 +49,4 @@ aware assess \
   --db-url sqlite:///output/custom-assess.db
 ```
 
-Or from the UI using the `DB URL` field.
+Or pass it directly with the CLI option `--db-url`.

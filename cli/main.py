@@ -549,27 +549,6 @@ def assess_end_to_end(
     typer.echo("Use --json to print the full structured payload.")
 
 
-@app.command("ui")
-def launch_ui(
-    host: Annotated[str | None, typer.Option("--host", help="UI host.")] = None,
-    port: Annotated[int | None, typer.Option("--port", help="UI port.")] = None,
-) -> None:
-    """Launch web UI for live parser conversation."""
-    try:
-        import uvicorn
-    except ImportError as exc:
-        typer.secho("uvicorn is required. Install dependencies with `pip install -e .`.", fg=typer.colors.RED)
-        raise typer.Exit(code=1) from exc
-
-    from ui.server import create_app
-
-    resolved_host = (host or os.getenv("UI_HOST", "127.0.0.1")).strip()
-    resolved_port = int(port if port is not None else os.getenv("UI_PORT", "8787"))
-
-    typer.secho(f"Starting Parser UI on http://{resolved_host}:{resolved_port}", fg=typer.colors.GREEN)
-    uvicorn.run(create_app(), host=resolved_host, port=resolved_port, reload=False)
-
-
 def _read_json_file(path: Path) -> dict[str, object]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
