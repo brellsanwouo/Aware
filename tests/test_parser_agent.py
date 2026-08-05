@@ -119,6 +119,136 @@ def test_normalization_recomputes_time_range_ts_with_utc_plus_8_tool(tmp_path) -
     assert normalized["failure_time_range_ts"]["end"] == 1614855600
 
 
+def test_nezha_normalization_uses_utc_and_selects_window_shards(tmp_path) -> None:
+    dated = tmp_path / "snapshot" / "rca_data" / "2023-01-30"
+    relative_files: list[str] = []
+    for domain, names in {
+        "log": ["11_49_log.csv", "11_50_log.csv", "11_51_log.csv", "11_52_log.csv", "11_53_log.csv", "11_54_log.csv"],
+        "trace": ["11_50_trace.csv", "11_51_trace.csv", "11_52_trace.csv", "11_53_trace.csv"],
+        "metric": ["container_cpu_usage_seconds_total.csv", "node_network_receive_bytes_total.csv"],
+    }.items():
+        directory = dated / domain
+        directory.mkdir(parents=True)
+        for name in names:
+            path = directory / name
+            path.write_text("header\n", encoding="utf-8")
+            relative_files.append(path.relative_to(tmp_path).as_posix())
+
+    payload = {
+        "task_type": "task_7",
+        "date": "2023-01-30",
+        "filename_date": "2023-01-30",
+        "failure_time_range": {"start": "11:50:30", "end": "11:53:30"},
+        "failures_detected": 1,
+        "uncertainty": {
+            "root_cause_time": "unknown",
+            "root_cause_component": "unknown",
+            "root_cause_reason": "unknown",
+        },
+        "objective": "Identify the component, occurrence time, and reason",
+    }
+    normalized = parser_module._normalize_candidate_payload(
+        payload=payload,
+        repository_path=tmp_path.resolve(),
+        repository_files=relative_files,
+        user_query="On January 30, 2023 between 11:50:30 and 11:53:30 UTC",
+        timezone_offset_minutes=0,
+        dataset_profile="nezha",
+    )
+
+    assert normalized["failure_time_range_ts"] == {"start": 1675079430, "end": 1675079610}
+    assert [path.rsplit("/", 1)[-1] for path in normalized["absolute_log_file"]] == [
+        "11_50_log.csv",
+        "11_51_log.csv",
+        "11_52_log.csv",
+        "11_53_log.csv",
+    ]
+    assert len(normalized["absolute_trace_file"]) == 4
+    assert len(normalized["absolute_metrics_file"]) == 2
+    assert normalized["filename_date_directory"].endswith("rca_data/2023-01-30")
+
+
+def test_canonical_nezha_incident_skips_parser_llm_and_bounds_file_events(tmp_path) -> None:
+    dated = tmp_path / "snapshot" / "rca_data" / "2023-01-30"
+    for domain, names in {
+        "log": ["11_50_log.csv", "11_51_log.csv", "11_52_log.csv"],
+        "trace": ["11_50_trace.csv", "11_51_trace.csv", "11_52_trace.csv"],
+        "metric": [f"service-{index}_metric.csv" for index in range(30)],
+    }.items():
+        directory = dated / domain
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (directory / name).write_text("timestamp,value\n", encoding="utf-8")
+    llm = MockLLMClient()
+    events = []
+    agent = parser_module.ParserAgent(llm_client=llm)
+
+    result = agent.generate_buildspec(
+        user_query=(
+            "On 2023-01-30, between 11:50:00 and 11:52:59 UTC, one failure occurred. "
+            "Identify the root cause component, occurrence time, and reason."
+        ),
+        repository_path=str(tmp_path),
+        timezone_offset_minutes=0,
+        dataset_profile="nezha",
+        on_event=events.append,
+    )
+
+    assert result.attempts == 0
+    assert llm.call_count == 0
+    assert result.buildspec.failure_time_range_ts.start == 1_675_079_400
+    assert len([event for event in events if event.phase == "discover_file"]) == 20
+    assert any(event.phase == "discover_file_summary" for event in events)
+    assert any(event.phase == "deterministic_buildspec" for event in events)
+
+
+def test_openrca_telecom_selects_date_files_and_accepts_missing_logs(tmp_path) -> None:
+    dated = tmp_path / "telemetry" / "2020_04_11"
+    relative_files = []
+    for domain, names in {
+        "trace": ["trace_span.csv"],
+        "metric": ["metric_node.csv", "metric_service.csv"],
+    }.items():
+        directory = dated / domain
+        directory.mkdir(parents=True)
+        for name in names:
+            path = directory / name
+            path.write_text("timestamp,value\n1586534700,1\n", encoding="utf-8")
+            relative_files.append(path.relative_to(tmp_path).as_posix())
+    payload = {
+        "task_type": "task_7",
+        "date": "2020-04-11",
+        "filename_date": "2020_04_11",
+        "failure_time_range": {"start": "00:05:00", "end": "00:05:59"},
+        "failures_detected": 1,
+        "uncertainty": {
+            "root_cause_time": "unknown",
+            "root_cause_component": "unknown",
+            "root_cause_reason": "unknown",
+        },
+        "objective": "Identify the component, occurrence time, and reason",
+        "absolute_log_file": [str((dated / "invented.log").resolve())],
+    }
+
+    normalized = parser_module._normalize_candidate_payload(
+        payload=payload,
+        repository_path=tmp_path.resolve(),
+        repository_files=relative_files,
+        user_query="On April 11, 2020 between 00:05:00 and 00:05:59 UTC+08:00",
+        timezone_offset_minutes=480,
+        dataset_profile="openrca_telecom",
+    )
+
+    assert normalized["failure_time_range_ts"] == {
+        "start": 1586534700,
+        "end": 1586534759,
+    }
+    assert normalized["absolute_log_file"] == []
+    assert len(normalized["absolute_trace_file"]) == 1
+    assert len(normalized["absolute_metrics_file"]) == 2
+    assert normalized["filename_date_directory"].endswith("telemetry/2020_04_11")
+
+
 def test_normalization_keeps_llm_task_type(tmp_path) -> None:
     payload = {
         "task_type": "task_7",

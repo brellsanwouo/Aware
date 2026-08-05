@@ -2,35 +2,47 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import queue
 import threading
 import time
 import uuid
+import zipfile
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 
 from agents.executor_agent import ExecutorAgentError, ExecutorEvent
 from agents.parser_agent import ParserAgentError, ParserEvent
 from llm.factory import create_llm_client
 from runtime.agent_factory import get_executor_agent, get_parser_agent
+from runtime.batch_store import (
+    batch_directory,
+    incident_log_path,
+    record_batch_incident,
+)
 from runtime.env import env_bool, load_env
 from runtime.knowledge_db import maybe_create_knowledge_store, resolve_db_url
 from runtime.output_store import persist_run_artifacts
+from runtime.nezha_dataset import build_nezha_problems, discover_nezha_root, problems_to_csv
+from runtime.openrca_dataset import build_openrca_problems, openrca_problems_to_csv
 from runtime.reporting import build_assessment_output
 
 
 def create_app() -> FastAPI:
     """Create UI app."""
     loaded_env_files = [str(path) for path in load_env()]
-    app = FastAPI(title="AWARE Assess UI (ParserAgent)")
+    rca_version = os.getenv("AWARE_RCA_VERSION", "v2").strip().lower()
+    rca_version = "v3" if rca_version == "v3" else "v2"
+    app = FastAPI(title=f"AWARE Assess UI ({rca_version.upper()})")
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
-        return _INDEX_HTML
+        index_path = Path(__file__).with_name("index.html")
+        return index_path.read_text(encoding="utf-8")
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
@@ -38,15 +50,98 @@ def create_app() -> FastAPI:
 
     @app.get("/api/config")
     def config() -> dict[str, str]:
+        project_root = Path(__file__).resolve().parent.parent
+        nezha_extracted = project_root / "data" / "Nezha" / "Nezha-v0.1"
+        nezha_case = project_root / "data" / "Nezha" / "cases" / "train-ticket-2023-01-30-1151"
+        openrca_root = project_root / "data" / "Openrca"
+        openrca_bank = openrca_root / "Bank-003" / "Bank"
+        openrca_market = openrca_root / "Market-002" / "Market" / "cloudbed-1"
+        openrca_telecom = openrca_root / "Telecom-001" / "Telecom"
+        try:
+            nezha_root = discover_nezha_root(nezha_extracted) if nezha_extracted.is_dir() else None
+        except ValueError:
+            nezha_root = None
         return {
             "ui_default_source_path": os.getenv("UI_DEFAULT_SOURCE_PATH", ""),
+            "nezha_case_path": str(nezha_root or (nezha_case if nezha_case.is_dir() else "")),
+            "openrca_bank_path": str(openrca_bank if openrca_bank.is_dir() else ""),
+            "openrca_market_path": str(openrca_market if openrca_market.is_dir() else ""),
+            "openrca_telecom_path": str(openrca_telecom if openrca_telecom.is_dir() else ""),
             "openai_model": os.getenv("OPENAI_MODEL", "gpt-5-mini"),
-            "executor_max_agents": os.getenv("EXECUTOR_MAX_AGENTS", "5"),
+            "executor_max_agents": os.getenv("EXECUTOR_MAX_AGENTS", ""),
             "parser_llm_provider": "openai-compatible",
             "aware_enable_reasoning": "true" if env_bool("AWARE_ENABLE_REASONING", True) else "false",
             "aware_enable_memory": "true" if env_bool("AWARE_ENABLE_MEMORY", True) else "false",
+            "rca_version": rca_version,
             "env_loaded_files": ", ".join(loaded_env_files),
         }
+
+    @app.get("/api/nezha/problems.csv")
+    def nezha_problems_csv(source_path: str | None = Query(None)) -> Response:
+        project_root = Path(__file__).resolve().parent.parent
+        selected_source = Path(source_path).expanduser() if source_path else project_root / "data" / "Nezha" / "Nezha-v0.1"
+        try:
+            csv_text = problems_to_csv(build_nezha_problems(selected_source))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return Response(
+            content=csv_text,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="nezha_incidents.csv"'},
+        )
+
+    @app.get("/api/openrca/{dataset}/problems.csv")
+    def openrca_problems_csv(
+        dataset: str,
+        source_path: str | None = Query(None),
+    ) -> Response:
+        project_root = Path(__file__).resolve().parent.parent
+        defaults = {
+            "bank": project_root / "data" / "Openrca" / "Bank-003",
+            "market": project_root / "data" / "Openrca" / "Market-002",
+            "telecom": project_root / "data" / "Openrca" / "Telecom-001",
+        }
+        dataset_name = dataset.strip().lower()
+        if dataset_name not in defaults:
+            raise HTTPException(status_code=404, detail=f"Unknown OpenRCA dataset: {dataset}")
+        selected_source = Path(source_path).expanduser() if source_path else defaults[dataset_name]
+        try:
+            csv_text = openrca_problems_to_csv(
+                build_openrca_problems(selected_source, dataset_name)
+            )
+        except (OSError, ValueError, csv.Error, zipfile.BadZipFile) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return Response(
+            content=csv_text,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="openrca_{dataset_name}_incidents.csv"'
+                )
+            },
+        )
+
+    @app.get("/api/batches/{batch_id}")
+    def batch_manifest(batch_id: str) -> FileResponse:
+        try:
+            path = batch_directory(batch_id) / "manifest.json"
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Batch manifest not found.")
+        return FileResponse(path, media_type="application/json", filename=f"{batch_id}-manifest.json")
+
+    @app.get("/api/batches/{batch_id}/incidents/{problem_id}")
+    def batch_incident_log(batch_id: str, problem_id: str, text: bool = Query(False)) -> FileResponse:
+        try:
+            json_path = incident_log_path(batch_id, problem_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        path = json_path.with_suffix(".log") if text else json_path
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Batch incident log not found.")
+        media_type = "text/plain" if text else "application/json"
+        return FileResponse(path, media_type=media_type, filename=path.name)
 
     @app.get("/api/parse-stream")
     def parse_stream(
@@ -58,6 +153,13 @@ def create_app() -> FastAPI:
         max_attempts: int | None = Query(None, ge=1, le=20),
         max_agents: int | None = Query(None, ge=1, le=200),
         buildspec_only: bool = Query(False),
+        timezone_offset_minutes: int = Query(480, ge=-720, le=840),
+        dataset_profile: str = Query(
+            "generic",
+            pattern="^(generic|nezha|openrca_bank|openrca_market|openrca_telecom)$",
+        ),
+        batch_id: str | None = Query(None, pattern=r"^[A-Za-z0-9_.-]{1,120}$"),
+        problem_id: str | None = Query(None, pattern=r"^[A-Za-z0-9_.-]{1,120}$"),
     ) -> StreamingResponse:
         selected_source = (source_path or repo or "").strip()
         if not selected_source:
@@ -156,18 +258,60 @@ def create_app() -> FastAPI:
                     content=str(item["content"]),
                 )
 
+        def persist_batch_log(
+            *,
+            status: str,
+            artifacts: dict[str, str],
+            result_payload: dict[str, object] | None,
+            error_message: str | None,
+        ) -> dict[str, str]:
+            if not batch_id or not problem_id:
+                return {}
+            with event_lock:
+                frozen_events = list(event_history)
+            agents_created = sum(
+                1 for item in frozen_events if item.get("phase") == "instantiate_agent"
+            )
+            stored = record_batch_incident(
+                batch_id=batch_id,
+                problem_id=problem_id,
+                run_id=run_id,
+                status=status,
+                agents_created=agents_created,
+                events=frozen_events,
+                artifacts=artifacts,
+                result_payload=result_payload,
+                error_message=error_message,
+            )
+            return {
+                **stored,
+                "manifest_url": f"/api/batches/{batch_id}",
+                "incident_log_url": f"/api/batches/{batch_id}/incidents/{problem_id}",
+                "incident_text_log_url": (
+                    f"/api/batches/{batch_id}/incidents/{problem_id}?text=true"
+                ),
+            }
+
         def worker() -> None:
             resolved_provider = "openai-compatible"
             resolved_model = llm_model or os.getenv("OPENAI_MODEL")
             resolved_attempts = int(max_attempts if max_attempts is not None else os.getenv("PARSER_MAX_ATTEMPTS", "5"))
+            configured_agent_budget = os.getenv("EXECUTOR_MAX_AGENTS", "").strip()
             default_max_agents = (
-                int(os.getenv("EXECUTOR_MAX_AGENTS", "5"))
-                if os.getenv("EXECUTOR_MAX_AGENTS", "5").strip().isdigit()
-                else 5
+                int(configured_agent_budget) if configured_agent_budget.isdigit() else None
             )
+            if rca_version == "v3" and max_agents is None:
+                default_max_agents = max(default_max_agents or 0, 8)
             resolved_max_agents = int(max_agents) if max_agents is not None else default_max_agents
             try:
                 push_event("System", "UI", "status", f"Starting Assess run... ({run_id})")
+                if batch_id and problem_id:
+                    push_event(
+                        "System",
+                        "UI",
+                        "batch",
+                        f"Batch context: batch_id={batch_id}; problem_id={problem_id}.",
+                    )
                 push_event("System", "UI", "status", f"Resolved LLM provider: {resolved_provider}")
                 push_event(
                     "System",
@@ -176,6 +320,12 @@ def create_app() -> FastAPI:
                     f"Runtime flags: reasoning={'on' if enable_reasoning else 'off'}, memory={'on' if enable_memory else 'off'}",
                 )
                 push_event("System", "UI", "status", f"Resolved DB URL: {resolved_db_url}")
+                push_event(
+                    "System",
+                    "UI",
+                    "status",
+                    f"Dataset profile: {dataset_profile}; UTC offset: {timezone_offset_minutes:+d} minutes.",
+                )
                 push_event(
                     "System",
                     "UI",
@@ -206,6 +356,8 @@ def create_app() -> FastAPI:
                     user_query=query,
                     repository_path=str(repo_path),
                     on_event=on_event,
+                    timezone_offset_minutes=timezone_offset_minutes,
+                    dataset_profile=dataset_profile,
                 )
                 if parser_agent.llm_client is None:
                     raise ParserAgentError("ParserAgent did not expose a configured LLM client.")
@@ -217,6 +369,8 @@ def create_app() -> FastAPI:
                         "payload": {
                             "buildspec": parser_result.buildspec.model_dump(mode="json"),
                             "attempts": parser_result.attempts,
+                            "timezone_offset_minutes": timezone_offset_minutes,
+                            "dataset_profile": dataset_profile,
                         },
                     }
                 )
@@ -229,6 +383,12 @@ def create_app() -> FastAPI:
                 if buildspec_only:
                     result_payload = {
                         "parser": parser_result.model_dump(mode="json"),
+                        "execution": {
+                            "run_id": run_id,
+                            "batch_id": batch_id,
+                            "problem_id": problem_id,
+                            "agents_created": 0,
+                        },
                     }
                     with event_lock:
                         frozen_events = list(event_history)
@@ -257,6 +417,14 @@ def create_app() -> FastAPI:
                         "artifact",
                         f"Saved run artifacts: json={artifacts['json_path']} | txt={artifacts['txt_path']}",
                     )
+                    batch_log = persist_batch_log(
+                        status="success",
+                        artifacts=artifacts,
+                        result_payload=result_payload,
+                        error_message=None,
+                    )
+                    if batch_log:
+                        result_payload["batch_log"] = batch_log
                     result_holder["result"] = result_payload
                     return
 
@@ -273,6 +441,12 @@ def create_app() -> FastAPI:
                     "parser": parser_result.model_dump(mode="json"),
                     "executor": executor_result.model_dump(mode="json"),
                     "assessment_output": assessment_output,
+                    "execution": {
+                        "run_id": run_id,
+                        "batch_id": batch_id,
+                        "problem_id": problem_id,
+                        "agents_created": len(executor_result.agents_instantiated),
+                    },
                 }
                 with event_lock:
                     frozen_events = list(event_history)
@@ -295,6 +469,14 @@ def create_app() -> FastAPI:
                     "artifact",
                     f"Saved run artifacts: json={artifacts['json_path']} | txt={artifacts['txt_path']}",
                 )
+                batch_log = persist_batch_log(
+                    status="success",
+                    artifacts=artifacts,
+                    result_payload=result_payload,
+                    error_message=None,
+                )
+                if batch_log:
+                    result_payload["batch_log"] = batch_log
                 result_holder["result"] = result_payload
             except (ParserAgentError, ExecutorAgentError) as exc:
                 result_holder["error"] = str(exc)
@@ -326,6 +508,12 @@ def create_app() -> FastAPI:
                     "artifact",
                     f"Saved run artifacts: json={artifacts['json_path']} | txt={artifacts['txt_path']}",
                 )
+                persist_batch_log(
+                    status="error",
+                    artifacts=artifacts,
+                    result_payload=None,
+                    error_message=str(exc),
+                )
             except Exception as exc:  # pragma: no cover
                 result_holder["error"] = f"Unexpected error: {exc}"
                 if knowledge_store is not None:
@@ -356,6 +544,12 @@ def create_app() -> FastAPI:
                     "artifact",
                     f"Saved run artifacts: json={artifacts['json_path']} | txt={artifacts['txt_path']}",
                 )
+                persist_batch_log(
+                    status="error",
+                    artifacts=artifacts,
+                    result_payload=None,
+                    error_message=f"Unexpected error: {exc}",
+                )
             finally:
                 done.set()
 
@@ -373,7 +567,15 @@ def create_app() -> FastAPI:
         threading.Thread(target=worker, daemon=True).start()
 
         def stream() -> str:
-            yield "data: " + json.dumps({"type": "run_start", "run_id": run_id}, ensure_ascii=False) + "\n\n"
+            yield "data: " + json.dumps(
+                {
+                    "type": "run_start",
+                    "run_id": run_id,
+                    "batch_id": batch_id,
+                    "problem_id": problem_id,
+                },
+                ensure_ascii=False,
+            ) + "\n\n"
             while not (done.is_set() and event_queue.empty()):
                 try:
                     item = event_queue.get(timeout=0.15)

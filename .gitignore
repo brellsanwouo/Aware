@@ -5,3 +5,5 @@ __pycache__/
 output/
 .env
 *.egg-info/
+.codex
+data/

@@ -12,10 +12,17 @@ from typing import Any, Callable
 from pydantic import BaseModel, ConfigDict, Field
 
 from agents.base import Agent
+from agents.v3_expert_agent import V3MetricExpertAgent
 from llm.base import LLMClient, LLMError
 from aware_models.buildspec import BuildSpec
-from aware_models.executor import AgentTaskResult, AssessFinding, ExecutorRunResult
+from aware_models.executor import (
+    AgentTaskResult,
+    AssessFinding,
+    CoordinatorDecision,
+    ExecutorRunResult,
+)
 from runtime.knowledge_db import SQLiteKnowledgeStore
+from runtime.causal_graph import build_causal_graph
 from templates.assess_templates import AgentTemplate, load_assess_templates
 from tools import telemetry_tools
 
@@ -47,6 +54,57 @@ _DECISION_RESPONSE_FORMAT: dict[str, Any] = {
                         },
                     },
                 },
+            },
+        },
+    },
+}
+
+_COORDINATOR_RESPONSE_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "rca_coordinator_checkpoint",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "root_cause_component",
+                "root_cause_reason",
+                "root_cause_time",
+                "confidence",
+                "unresolved_fields",
+                "focus_component",
+                "followup_domains",
+                "rationale",
+            ],
+            "properties": {
+                "root_cause_component": {"type": "string"},
+                "root_cause_reason": {"type": "string"},
+                "root_cause_time": {"type": "integer"},
+                "confidence": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                },
+                "unresolved_fields": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "root_cause_component",
+                            "root_cause_reason",
+                            "root_cause_time",
+                        ],
+                    },
+                },
+                "focus_component": {"type": "string"},
+                "followup_domains": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["logs", "trace", "metrics"],
+                    },
+                },
+                "rationale": {"type": "string"},
             },
         },
     },
@@ -201,6 +259,166 @@ class AnalyzerAgent(Agent):
             detail=f"{detail}{summary_suffix}",
         )
 
+    def analyze_need(
+        self,
+        file_paths: tuple[Path, ...],
+        buildspec: BuildSpec,
+        shared_memory_context: list[str] | None = None,
+        component_focus: str | None = None,
+    ) -> AgentTaskResult:
+        """Resolve one analytical need using one or more evidence fragments."""
+        if len(file_paths) > 1:
+            return self._analyze_combined_need(
+                file_paths,
+                buildspec,
+                shared_memory_context=shared_memory_context,
+                component_focus=component_focus,
+            )
+        partial = [
+            self.analyze(
+                file_path,
+                buildspec,
+                shared_memory_context=shared_memory_context,
+                component_focus=component_focus,
+            )
+            for file_path in file_paths
+        ]
+        if len(partial) == 1:
+            return partial[0]
+        findings = [finding for item in partial for finding in item.findings]
+        statuses = {item.status for item in partial}
+        status = "ok" if "ok" in statuses else ("error" if "error" in statuses else "skipped")
+        return AgentTaskResult(
+            agent_name=self.name,
+            target_path=json.dumps([str(path) for path in file_paths], ensure_ascii=False),
+            status=status,
+            findings=findings,
+            detail=(
+                f"need_sources={len(file_paths)}; component_focus={component_focus or 'none'}; "
+                + " | ".join(item.detail for item in partial)
+            ),
+        )
+
+    def _analyze_combined_need(
+        self,
+        file_paths: tuple[Path, ...],
+        buildspec: BuildSpec,
+        shared_memory_context: list[str] | None,
+        component_focus: str | None,
+    ) -> AgentTaskResult:
+        """Analyze a domain as one task and make one consolidated LLM decision."""
+        source_contexts: list[dict[str, Any]] = []
+        semantic_findings: list[AssessFinding] = []
+        fallback_findings: list[AssessFinding] = []
+        details: list[str] = []
+        statuses: set[str] = set()
+        for file_path in file_paths:
+            if not file_path.exists() or not file_path.is_file():
+                statuses.add("skipped")
+                details.append(f"{file_path}: missing")
+                continue
+            view = telemetry_tools.load_csv_window(
+                file_path=file_path,
+                start_ts=buildspec.failure_time_range_ts.start,
+                end_ts=buildspec.failure_time_range_ts.end,
+            )
+            if component_focus:
+                view = telemetry_tools.apply_component_focus(
+                    view,
+                    domain=self.template.domain,
+                    component=component_focus,
+                ).view
+            context = telemetry_tools.build_llm_observation_context(
+                view,
+                domain=self.template.domain,
+                start_ts=buildspec.failure_time_range_ts.start,
+                end_ts=buildspec.failure_time_range_ts.end,
+                sample_limit=4,
+            )
+            semantic_findings.extend(
+                _semantic_context_findings(
+                    domain=self.template.domain,
+                    tool_context=context,
+                    source_path=str(file_path),
+                    agent_name=self.name,
+                    known_components=self.known_components,
+                )
+            )
+            fallback_findings.extend(
+                _fallback_findings_from_tools(
+                    self.template.domain,
+                    view,
+                    str(file_path),
+                    self.name,
+                )
+            )
+            source_contexts.append(
+                {
+                    "source": str(file_path),
+                    "rows_in_window": view.window_rows,
+                    "timestamp_field": view.timestamp_field,
+                    "semantic_columns": context.get("semantic_columns", {}),
+                    "semantic_summary": context.get("semantic_summary", {}),
+                    "inter_service_network_latency": context.get(
+                        "inter_service_network_latency", []
+                    ),
+                    "log_failure_signals": context.get("log_failure_signals", []),
+                    "long_form_kpi_anomalies": context.get("long_form_kpi_anomalies", []),
+                    "service_latency_anomalies": context.get("service_latency_anomalies", []),
+                    "sample_lines": context.get("sample_lines", [])[:4],
+                }
+            )
+            details.append(
+                f"{file_path.name}: "
+                + telemetry_tools.window_detail(
+                    view,
+                    start_ts=buildspec.failure_time_range_ts.start,
+                    end_ts=buildspec.failure_time_range_ts.end,
+                )
+            )
+            statuses.add("ok")
+
+        combined_context = {
+            "domain": self.template.domain,
+            "window": {
+                "start": buildspec.failure_time_range_ts.start,
+                "end": buildspec.failure_time_range_ts.end,
+            },
+            "component_focus": component_focus,
+            "source_count": len(source_contexts),
+            "sources": source_contexts,
+        }
+        llm_findings, llm_summary = _decide_findings_with_llm(
+            llm_client=self.llm_client,
+            template=self.template,
+            target_path=json.dumps([str(path) for path in file_paths], ensure_ascii=False),
+            buildspec=buildspec,
+            tool_context=combined_context,
+            agent_name=self.name,
+            knowledge_text=self.knowledge_text,
+            known_components=self.known_components,
+            known_reasons=self.known_reasons,
+            shared_memory_context=(
+                list(shared_memory_context or []) if self.enable_memory else []
+            ),
+            reasoning_enabled=self.enable_reasoning,
+        )
+        selected = llm_findings or fallback_findings
+        findings = _compact_domain_findings([*selected, *semantic_findings])
+        status = "ok" if "ok" in statuses else "skipped"
+        focus_note = f"; component_focus={component_focus}" if component_focus else ""
+        return AgentTaskResult(
+            agent_name=self.name,
+            target_path=json.dumps([str(path) for path in file_paths], ensure_ascii=False),
+            status=status,
+            findings=findings,
+            detail=(
+                f"need_sources={len(file_paths)}; consolidated_llm_decisions=1{focus_note}; "
+                f"llm_summary={llm_summary[:220]}; "
+                + " | ".join(details)
+            ),
+        )
+
 
 class ExecutorAgent(Agent):
     """Orchestrate Assess execution using dynamic templates and ADK sub-agents."""
@@ -215,6 +433,7 @@ class ExecutorAgent(Agent):
         knowledge_file: str | None = None,
         enable_reasoning: bool = True,
         enable_memory: bool = True,
+        execution_mode: str = "v2",
     ) -> None:
         super().__init__(
             name="ExecutorAgent",
@@ -224,6 +443,7 @@ class ExecutorAgent(Agent):
         self.templates = templates or load_assess_templates()
         self.enable_reasoning = bool(enable_reasoning)
         self.enable_memory = bool(enable_memory)
+        self.execution_mode = "v3" if str(execution_mode).strip().lower() == "v3" else "v2"
         self.knowledge_file = knowledge_file or os.getenv(
             "AWARE_EXECUTOR_KB_FILE",
             "knowledge/executor_rca_kb.md",
@@ -249,7 +469,8 @@ class ExecutorAgent(Agent):
             content=(
                 f"ExecutorAgent started. repository={repo}; "
                 f"reasoning={'on' if self.enable_reasoning else 'off'}; "
-                f"memory={'on' if self.enable_memory else 'off'}."
+                f"memory={'on' if self.enable_memory else 'off'}; "
+                f"execution_mode={self.execution_mode}."
             ),
         )
         if not repo.exists():
@@ -274,32 +495,47 @@ class ExecutorAgent(Agent):
         )
 
         cap = max(1, int(max_agents)) if max_agents is not None else None
+        configured_expansions = os.getenv("EXECUTOR_MAX_EXPANSIONS", "2").strip()
+        expansion_budget = (
+            int(configured_expansions) if configured_expansions.isdigit() else 2
+        )
+        expansion_budget = max(0, min(expansion_budget, 4))
         if cap is not None:
             self._emit(
                 on_event,
                 phase="config",
                 recipient="Runtime",
-                content=f"Max sub-agents cap set to {cap}.",
+                content=f"Optional safety task budget set to {cap}.",
             )
+        self._emit(
+            on_event,
+            phase="controlled_adaptive_config",
+            recipient="Runtime",
+            content=(
+                "Controlled adaptive policy: at most one seed agent per available "
+                f"telemetry domain and at most {expansion_budget} focused follow-up agent(s)."
+            ),
+        )
 
         task_results: list[AgentTaskResult] = []
         findings: list[AssessFinding] = []
         shared_memory_context: list[str] = []
         agents_instantiated: list[str] = []
 
-        # Progressive + expand scheduler:
+        # Controlled adaptive scheduler:
         # 1) discover initial targets by template
-        # 2) enqueue one seed task per template
+        # 2) enqueue one grouped seed task per available telemetry domain
         # 3) instantiate-run-terminate one agent at a time
-        # 4) after each result, optionally enqueue expansion tasks on discovered components
+        # 4) after all seeds, optionally enqueue at most a few focused follow-ups
         discovered_by_template: dict[str, tuple[AgentTemplate, list[Path]]] = {}
         template_order: list[str] = []
-        total_discovered = 0
+        seed_domain_count = 0
         for template in self.templates:
             targets = _discover_targets_for_template(buildspec, template)
             discovered_by_template[template.template_id] = (template, targets)
             template_order.append(template.template_id)
-            total_discovered += len(targets)
+            if targets:
+                seed_domain_count += 1
             self._emit(
                 on_event,
                 phase="plan_targets",
@@ -308,70 +544,86 @@ class ExecutorAgent(Agent):
                 sender=template.agent_name,
             )
 
-        if cap is not None and total_discovered < cap:
+        if cap is not None and seed_domain_count < cap:
             self._emit(
                 on_event,
                 phase="capacity_info",
                 recipient="Runtime",
                 content=(
-                    f"max_agents={cap}, but only {total_discovered} initial target(s) were discovered "
-                    "from BuildSpec + repository scan."
+                    f"max_agents={cap}, but only {seed_domain_count} initial domain task(s) "
+                    "were planned from the BuildSpec."
                 ),
             )
 
-        queue: list[tuple[AgentTemplate, Path, str | None, str]] = []
-        remaining_by_template: dict[str, list[Path]] = {}
+        queue: list[tuple[AgentTemplate, tuple[Path, ...], str | None, str]] = []
         queued_signatures: set[tuple[str, str, str]] = set()
         executed_signatures: set[tuple[str, str, str]] = set()
+        cap_reached = False
 
         def _task_signature(
             template_id: str,
-            target_path: Path,
+            target_paths: tuple[Path, ...],
             component_focus: str | None,
         ) -> tuple[str, str, str]:
-            return (template_id, str(target_path), (component_focus or "").strip().lower())
+            paths_key = "\n".join(str(path) for path in target_paths)
+            return (template_id, paths_key, (component_focus or "").strip().lower())
 
         def _enqueue_task(
             *,
             template: AgentTemplate,
-            target_path: Path,
+            target_paths: tuple[Path, ...],
             component_focus: str | None,
             origin: str,
             instantiated_count_now: int,
         ) -> bool:
+            nonlocal cap_reached
             if cap is not None and (instantiated_count_now + len(queue)) >= cap:
+                cap_reached = True
                 return False
-            signature = _task_signature(template.template_id, target_path, component_focus)
+            if not target_paths:
+                return False
+            signature = _task_signature(template.template_id, target_paths, component_focus)
             if signature in queued_signatures or signature in executed_signatures:
                 return False
-            queue.append((template, target_path, component_focus, origin))
+            queue.append((template, target_paths, component_focus, origin))
             queued_signatures.add(signature)
             return True
 
-        for template_id in template_order:
+        seed_order = sorted(
+            template_order,
+            key=lambda template_id: {
+                "metrics": 0,
+                "logs": 1,
+                "trace": 2,
+            }.get(discovered_by_template[template_id][0].domain, 3),
+        )
+        for template_id in seed_order:
             template, targets = discovered_by_template[template_id]
-            remaining = list(targets)
-            remaining_by_template[template_id] = remaining
-            if remaining:
-                first = remaining.pop(0)
+            if targets:
+                # All files from one signal family jointly answer one domain question.
                 _enqueue_task(
                     template=template,
-                    target_path=first,
+                    target_paths=tuple(targets),
                     component_focus=None,
                     origin="seed",
                     instantiated_count_now=0,
                 )
 
         instantiated_count = 0
-        cap_reached = False
         instance_counts: dict[str, int] = {}
         expansion_tasks_enqueued = 0
+        component_display: dict[str, str] = {}
+        component_domain_support: dict[str, set[str]] = {}
+        component_evidence_score: dict[str, int] = {}
+        expansion_planned = False
+        v3_experts_planned = False
+        seed_checkpoint: CoordinatorDecision | None = None
         while queue:
             if cap is not None and instantiated_count >= cap:
                 cap_reached = True
                 break
-            template, target_path, component_focus, origin = queue.pop(0)
-            signature = _task_signature(template.template_id, target_path, component_focus)
+            template, target_paths, component_focus, origin = queue.pop(0)
+            signature = _task_signature(template.template_id, target_paths, component_focus)
             queued_signatures.discard(signature)
             if signature in executed_signatures:
                 continue
@@ -387,7 +639,7 @@ class ExecutorAgent(Agent):
                 recipient="ExecutorAgent",
                 content=(
                     f"Instantiated {instance_name} from template={template.template_id}; "
-                    f"tools={', '.join(template.tools)}; target={target_path}; "
+                    f"tools={', '.join(template.tools)}; sources={len(target_paths)}; "
                     f"component_focus={component_focus or 'none'}; origin={origin}"
                 ),
                 sender=instance_name,
@@ -410,14 +662,18 @@ class ExecutorAgent(Agent):
                 phase="dispatch",
                 recipient="ExecutorAgent",
                 content=(
-                    f"I will analyze {target_path} using tools "
+                    f"I will resolve one {template.domain} need from {len(target_paths)} source(s) using tools "
                     f"[{', '.join(template.tools)}], then decide with LLM "
                     f"(reasoning_mode={'deep' if self.enable_reasoning else 'fast'}); "
                     f"component_focus={component_focus or 'none'}."
                 ),
                 sender=instance_name,
             )
-            if self.enable_memory and shared_memory_context:
+            if (
+                self.enable_memory
+                and self.execution_mode == "v2"
+                and shared_memory_context
+            ):
                 self._emit(
                     on_event,
                     phase="read_shared_memory",
@@ -427,6 +683,7 @@ class ExecutorAgent(Agent):
             component_memory_context: list[str] = []
             if (
                 self.enable_memory
+                and self.execution_mode == "v2"
                 and knowledge_store is not None
                 and component_focus
             ):
@@ -444,12 +701,15 @@ class ExecutorAgent(Agent):
                             f"component={component_focus}."
                         ),
                     )
-            analysis_memory_context = [
-                *shared_memory_context,
-                *component_memory_context,
-            ]
-            result = agent.analyze(
-                target_path,
+            # V3 experts must form their first opinion from telemetry, not from
+            # another expert's prose. Cross-agent opinions are reconciled later.
+            analysis_memory_context = (
+                []
+                if self.execution_mode == "v3"
+                else [*shared_memory_context, *component_memory_context]
+            )
+            result = agent.analyze_need(
+                target_paths,
                 buildspec,
                 shared_memory_context=analysis_memory_context,
                 component_focus=component_focus,
@@ -527,24 +787,29 @@ class ExecutorAgent(Agent):
             )
             del agent
 
-            # Progressive baseline: only enqueue next seed target of same template
-            # after current target completion.
-            remaining = remaining_by_template.get(template.template_id, [])
-            if remaining:
-                next_target = remaining.pop(0)
-                _enqueue_task(
-                    template=template,
-                    target_path=next_target,
-                    component_focus=None,
-                    origin="seed",
-                    instantiated_count_now=instantiated_count,
-                )
-
-            # Dynamic expansion: create new focused tasks from discovered components.
+            # Dynamic decomposition: findings create new component investigation needs.
+            # The vocabulary is open; any telemetry-backed component may become a need.
             component_candidates = _extract_component_candidates_from_findings(
                 result.findings,
                 known_components=known_components,
             )
+            if origin == "seed":
+                for component in component_candidates:
+                    key = component.strip().lower()
+                    if not key:
+                        continue
+                    component_display.setdefault(key, component)
+                    component_domain_support.setdefault(key, set()).add(template.domain)
+                    matching_findings = [
+                        finding
+                        for finding in result.findings
+                        if _finding_mentions_component(finding, component)
+                    ]
+                    component_evidence_score[key] = component_evidence_score.get(key, 0) + sum(
+                        {"low": 1, "medium": 2, "high": 3}[finding.severity]
+                        + (2 if finding.kind == "anomaly" else 0)
+                        for finding in matching_findings
+                    )
             if component_candidates:
                 self._emit(
                     on_event,
@@ -555,29 +820,286 @@ class ExecutorAgent(Agent):
                     ),
                     sender=instance_name,
                 )
+            if self.execution_mode == "v2" and origin == "seed" and (
+                _has_decisive_structured_metric(result.findings)
+                or _has_decisive_direct_log_failure(result.findings)
+            ):
+                skipped_seed_count = sum(
+                    1 for _, _, _, queued_origin in queue if queued_origin == "seed"
+                )
+                queue[:] = [item for item in queue if item[3] != "seed"]
+                if skipped_seed_count:
+                    self._emit(
+                        on_event,
+                        phase="early_convergence",
+                        recipient="Runtime",
+                        content=(
+                            "A unique structured anomaly resolved the incident; "
+                            f"skipped {skipped_seed_count} unnecessary seed domain agent(s)."
+                        ),
+                    )
+            # Complete broad evidence coverage first. Then, at most once, focus the
+            # best weakly-supported component in other domains. A candidate already
+            # corroborated by two domains does not justify another agent.
+            baseline_pending = any(queued_origin == "seed" for _, _, _, queued_origin in queue)
             enqueued_now = 0
-            for component in component_candidates:
-                for template_id in template_order:
-                    exp_template, exp_targets = discovered_by_template[template_id]
-                    for exp_target in exp_targets:
+            should_checkpoint = not baseline_pending and not expansion_planned
+            if should_checkpoint:
+                expansion_planned = True
+                if self.execution_mode == "v3" and not v3_experts_planned:
+                    v3_experts_planned = True
+                    metric_targets = [Path(item) for item in buildspec.absolute_metrics_file]
+                    routed_specialties = ["jvm", "mysql", "redis"] if metric_targets else []
+                    self._emit(
+                        on_event,
+                        phase="expert_router",
+                        recipient="Runtime",
+                        content=(
+                            "V3 evidence router selected: "
+                            + (", ".join(routed_specialties) if routed_specialties else "no technical specialist")
+                            + ". Each specialist may explicitly abstain when its mechanism is unsupported."
+                        ),
+                    )
+                    for specialty in routed_specialties:
+                        if cap is not None and instantiated_count >= cap:
+                            cap_reached = True
+                            break
+                        expert = V3MetricExpertAgent(specialty)  # type: ignore[arg-type]
+                        self._emit(
+                            on_event,
+                            phase="instantiate_agent",
+                            recipient="ExecutorAgent",
+                            content=(
+                                f"Instantiated {expert.name} for independent V3 "
+                                f"specialty={specialty}; sources={len(metric_targets)}."
+                            ),
+                            sender=expert.name,
+                        )
+                        agents_instantiated.append(expert.name)
+                        instantiated_count += 1
+                        self._emit(
+                            on_event,
+                            phase="dispatch",
+                            recipient="ExecutorAgent",
+                            content=(
+                                "Independent evidence pass: change-point, baseline, "
+                                f"and mechanism analysis for {specialty}."
+                            ),
+                            sender=expert.name,
+                        )
+                        expert_result = expert.analyze(metric_targets, buildspec)
+                        task_results.append(expert_result)
+                        findings.extend(expert_result.findings)
+                        if self.enable_memory and knowledge_store and run_id:
+                            knowledge_store.append_task_result(
+                                run_id=run_id,
+                                agent_name=expert_result.agent_name,
+                                target_path=expert_result.target_path,
+                                status=expert_result.status,
+                                detail=expert_result.detail,
+                            )
+                            for expert_finding in expert_result.findings:
+                                knowledge_store.append_finding(
+                                    run_id=run_id,
+                                    agent_name=expert_finding.agent,
+                                    kind=expert_finding.kind,
+                                    source=expert_finding.source,
+                                    summary=expert_finding.summary,
+                                    evidence=expert_finding.evidence,
+                                    severity=expert_finding.severity,
+                                )
+                        expert_components = _extract_component_candidates_from_findings(
+                            expert_result.findings,
+                            known_components=known_components,
+                        )
+                        for expert_component in expert_components:
+                            key = expert_component.strip().lower()
+                            component_display.setdefault(key, expert_component)
+                            component_domain_support.setdefault(key, set()).add(
+                                f"expert:{specialty}"
+                            )
+                            component_evidence_score[key] = (
+                                component_evidence_score.get(key, 0)
+                                + sum(
+                                    5
+                                    for finding in expert_result.findings
+                                    if _finding_mentions_component(finding, expert_component)
+                                )
+                            )
+                        self._emit(
+                            on_event,
+                            phase="agent_result",
+                            recipient="ExecutorAgent",
+                            content=(
+                                f"{expert.name} completed with status={expert_result.status}; "
+                                f"findings={len(expert_result.findings)}"
+                            ),
+                            sender=expert.name,
+                        )
+                        self._emit(
+                            on_event,
+                            phase="terminate_agent",
+                            recipient="ExecutorAgent",
+                            content=f"Terminated {expert.name} after independent expert pass.",
+                            sender=expert.name,
+                        )
+                seed_checkpoint = _coordinate_findings(
+                    llm_client=self.llm_client,
+                    buildspec=buildspec,
+                    findings=findings,
+                )
+                if seed_checkpoint is not None:
+                    self._emit(
+                        on_event,
+                        phase="synthesis_checkpoint",
+                        recipient="Runtime",
+                        content=(
+                            f"First-pass synthesis: confidence={seed_checkpoint.confidence}; "
+                            f"component={seed_checkpoint.root_cause_component or 'unresolved'}; "
+                            f"reason={seed_checkpoint.root_cause_reason or 'unresolved'}; "
+                            f"time={seed_checkpoint.root_cause_time or 'unresolved'}; "
+                            f"unresolved={seed_checkpoint.unresolved_fields}."
+                        ),
+                    )
+                ranked_components = sorted(
+                    component_domain_support,
+                    key=lambda key: (
+                        -len(component_domain_support[key]),
+                        -component_evidence_score.get(key, 0),
+                        key,
+                    ),
+                )
+                selected_key = ranked_components[0] if ranked_components else None
+                fallback_component = component_display.get(selected_key or "", "")
+                component = (
+                    (
+                        seed_checkpoint.focus_component
+                        or seed_checkpoint.root_cause_component
+                        or fallback_component
+                    )
+                    if seed_checkpoint is not None
+                    else fallback_component
+                )
+                component_key = component.strip().lower()
+                support = component_domain_support.get(component_key, set())
+                checkpoint_complete = bool(
+                    seed_checkpoint is not None
+                    and seed_checkpoint.confidence == "high"
+                    and not seed_checkpoint.unresolved_fields
+                )
+                component_unresolved = bool(
+                    seed_checkpoint is None
+                    or not seed_checkpoint.root_cause_component
+                    or "root_cause_component" in seed_checkpoint.unresolved_fields
+                )
+                explicit_followup_requested = bool(
+                    seed_checkpoint is not None
+                    and seed_checkpoint.followup_domains
+                )
+                weak_checkpoint = bool(
+                    seed_checkpoint is None
+                    or seed_checkpoint.confidence != "high"
+                    or seed_checkpoint.unresolved_fields
+                )
+                requested_unknowns = any(
+                    value == "unknown"
+                    for value in buildspec.uncertainty.model_dump().values()
+                )
+                needs_focused_verification = bool(
+                    explicit_followup_requested
+                    or (component_unresolved and len(support) < 2)
+                    or (weak_checkpoint and len(support) < 2)
+                )
+                may_expand = (
+                    requested_unknowns
+                    and expansion_budget > 0
+                    and not checkpoint_complete
+                    and needs_focused_verification
+                )
+                if component and may_expand:
+                    remaining = expansion_budget
+                    requested_domains = (
+                        list(dict.fromkeys(seed_checkpoint.followup_domains))
+                        if explicit_followup_requested and seed_checkpoint is not None
+                        else [
+                            discovered_by_template[item][0].domain
+                            for item in template_order
+                        ]
+                    )
+                    for requested_domain in requested_domains:
+                        if remaining <= 0:
+                            break
+                        matching_template = next(
+                            (
+                                discovered_by_template[item]
+                                for item in template_order
+                                if discovered_by_template[item][0].domain == requested_domain
+                            ),
+                            None,
+                        )
+                        if matching_template is None:
+                            continue
+                        exp_template, exp_targets = matching_template
+                        # A coordinator-requested domain is intentionally allowed
+                        # to revisit the same files with a component focus. The
+                        # task signature includes that focus, so this remains one
+                        # bounded verification rather than recursive duplication.
+                        if exp_template.domain in support and not explicit_followup_requested:
+                            continue
+                        relevant_targets = _targets_for_component_need(
+                            template=exp_template,
+                            targets=exp_targets,
+                            component=component,
+                        )
                         ok = _enqueue_task(
                             template=exp_template,
-                            target_path=exp_target,
+                            target_paths=tuple(relevant_targets),
                             component_focus=component,
-                            origin=f"expand:{instance_name}",
+                            origin=f"focused_followup:{instance_name}",
                             instantiated_count_now=instantiated_count,
                         )
                         if ok:
+                            remaining -= 1
                             enqueued_now += 1
                             expansion_tasks_enqueued += 1
+                elif component:
+                    self._emit(
+                        on_event,
+                        phase="expansion_skipped",
+                        recipient="Runtime",
+                        content=(
+                            f"No focused follow-up needed for {component}: "
+                            + (
+                                "the first-pass synthesis is complete with high confidence."
+                                if checkpoint_complete
+                                else "the checkpoint is sufficiently corroborated across domains."
+                                if not needs_focused_verification
+                                else f"corroborated by {len(support)} telemetry domains."
+                            )
+                        ),
+                    )
             if enqueued_now > 0:
                 self._emit(
                     on_event,
                     phase="expand_enqueue",
                     recipient="ExecutorAgent",
-                    content=f"Enqueued {enqueued_now} expansion task(s) from {instance_name}.",
+                    content=(
+                        f"Enqueued {enqueued_now}/{expansion_budget} allowed focused "
+                        f"follow-up task(s) from {instance_name}."
+                    ),
                     sender=instance_name,
                 )
+
+        if not cap_reached:
+            self._emit(
+                on_event,
+                phase="converged",
+                recipient="Runtime",
+                content=(
+                    "Controlled adaptive queue converged: initial telemetry domains were "
+                    "covered and no justified focused follow-up remained."
+                ),
+            )
 
         if cap_reached:
             self._emit(
@@ -586,6 +1108,26 @@ class ExecutorAgent(Agent):
                 recipient="Runtime",
                 content=f"Reached max_agents={cap}; remaining discovered targets were skipped.",
             )
+
+        coordinator_decision = seed_checkpoint
+        if expansion_tasks_enqueued > 0:
+            coordinator_decision = _coordinate_findings(
+                llm_client=self.llm_client,
+                buildspec=buildspec,
+                findings=findings,
+            ) or seed_checkpoint
+            if coordinator_decision is not None:
+                self._emit(
+                    on_event,
+                    phase="final_synthesis_checkpoint",
+                    recipient="Runtime",
+                    content=(
+                        f"Final synthesis: confidence={coordinator_decision.confidence}; "
+                        f"component={coordinator_decision.root_cause_component or 'unresolved'}; "
+                        f"reason={coordinator_decision.root_cause_reason or 'unresolved'}; "
+                        f"time={coordinator_decision.root_cause_time or 'unresolved'}."
+                    ),
+                )
 
         preliminary_causes = _derive_preliminary_causes(findings)
         confidence = _estimate_confidence(findings, preliminary_causes)
@@ -610,6 +1152,11 @@ class ExecutorAgent(Agent):
                 preliminary_causes=preliminary_causes,
             )
 
+        causal_graph = (
+            build_causal_graph(findings, coordinator_decision)
+            if self.execution_mode == "v3"
+            else None
+        )
         return ExecutorRunResult(
             buildspec=buildspec,
             agents_instantiated=agents_instantiated,
@@ -617,6 +1164,9 @@ class ExecutorAgent(Agent):
             findings=findings,
             preliminary_causes=preliminary_causes,
             confidence=confidence,
+            coordinator_decision=coordinator_decision,
+            execution_mode=self.execution_mode,
+            causal_graph=causal_graph,
             summary=summary,
         )
 
@@ -661,10 +1211,14 @@ def _decide_findings_with_llm(
         f"Objective: {template.objective}\n"
         "You are an RCA assessor. Decide findings strictly from provided tool outputs.\n"
         "Use semantic_columns and semantic_summary as primary evidence over raw sample_lines.\n"
+        "When tool outputs contain a sources array, compare all sources and return one consolidated domain decision.\n"
+        "Do not report CSV column names (for example PodName, cmdb_id, serviceName) as components.\n"
         "Infer component/reason cues from the detected column roles and in-window stats.\n"
         "Root cause components must come from telemetry values (cmdb_id/tc/kpi context), never file names.\n"
         "If component candidates exist in semantic_summary.top_component_values, cite them explicitly in findings.\n"
-        "Use the provided executor_knowledge for schema understanding and allowed component/reason hints.\n"
+        "Use executor_knowledge for schema understanding and candidate component/reason examples.\n"
+        "The reason examples are non-exhaustive: propose a novel cause when tool evidence supports it.\n"
+        "Never describe components or reasons as 'allowed'; absence from prior knowledge is not rejection.\n"
         "Do not invent evidence outside tool_context.\n"
         "Use shared_memory_context as prior agent observations from the same run.\n"
         f"Reasoning mode: {'deep' if reasoning_enabled else 'fast'}.\n"
@@ -680,7 +1234,7 @@ def _decide_findings_with_llm(
         f"- failure_window_start={buildspec.failure_time_range_ts.start}\n"
         f"- failure_window_end={buildspec.failure_time_range_ts.end}\n"
         f"- known_components={json.dumps(known_components, ensure_ascii=False)}\n"
-        f"- known_reasons={json.dumps(known_reasons, ensure_ascii=False)}\n"
+        f"- non_exhaustive_reason_examples={json.dumps(known_reasons, ensure_ascii=False)}\n"
         f"- shared_memory_context={json.dumps(shared_memory_context[:25], ensure_ascii=False)}\n"
         "tool_context_json:\n"
         f"{json.dumps(tool_context, ensure_ascii=False)}"
@@ -811,6 +1365,31 @@ def _fallback_findings_from_tools(
             durations_ms = [int(item) for item in re.findall(r"(\d+)\s*ms", text)]
         max_duration = max(durations_ms) if durations_ms else 0
         findings = []
+        network_summary = telemetry_tools.summarize_inter_service_network_latency(view.rows)
+        network_anomalies = [
+            item for item in network_summary if float(item.get("p90_ms", 0.0)) >= 300.0
+        ]
+        for item in network_anomalies[:3]:
+            component = str(item.get("component", "unknown"))
+            findings.append(
+                AssessFinding(
+                    agent=agent_name,
+                    kind="anomaly",
+                    source=source_path,
+                    summary=(
+                        "Inter-service network delay detected for component "
+                        f"{component} (p90={item.get('p90_ms')}ms)."
+                    ),
+                    evidence=[
+                        f"component={component}",
+                        "candidate_reason=network delay",
+                        f"network_p90_ms={item.get('p90_ms')}",
+                        f"network_max_ms={item.get('max_ms')}",
+                        f"peak_ts={item.get('peak_ts')}",
+                    ],
+                    severity="high",
+                )
+            )
         if timeout_count > 0:
             findings.append(
                 AssessFinding(
@@ -922,6 +1501,106 @@ def _fallback_findings_from_tools(
     return findings
 
 
+def _compact_domain_findings(
+    findings: list[AssessFinding],
+    *,
+    max_anomalies: int = 10,
+    max_observations: int = 6,
+) -> list[AssessFinding]:
+    """Keep a bounded, evidence-rich result from one consolidated domain task."""
+    deduped: list[AssessFinding] = []
+    seen: set[tuple[str, str, str]] = set()
+    for finding in findings:
+        key = (finding.kind, finding.source, finding.summary)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(finding)
+
+    severity_score = {"low": 1, "medium": 2, "high": 3}
+
+    def priority(item: AssessFinding) -> tuple[int, int, int]:
+        merged = " ".join([item.summary, *item.evidence]).lower()
+        explicit_component = int("component=" in merged or "candidate_reason=" in merged)
+        numeric_signal = int(
+            any(token in merged for token in ("cpu", "latency", "error", "timeout", "memory"))
+        )
+        return (severity_score[item.severity], explicit_component, numeric_signal)
+
+    anomalies = sorted(
+        (item for item in deduped if item.kind == "anomaly"),
+        key=priority,
+        reverse=True,
+    )[:max_anomalies]
+    observations = sorted(
+        (item for item in deduped if item.kind == "observation"),
+        key=lambda item: (
+            int(item.summary.startswith("Top component identifiers")),
+            int("timestamp bounds" in item.summary.lower()),
+            priority(item),
+        ),
+        reverse=True,
+    )[:max_observations]
+    return [*anomalies, *observations]
+
+
+def _has_decisive_structured_metric(findings: list[AssessFinding]) -> bool:
+    """Return true only for one unambiguous long-form KPI hypothesis."""
+    hypotheses: dict[tuple[str, str], int] = {}
+    for finding in findings:
+        if finding.kind != "anomaly" or not finding.agent.startswith("MetricsAgent"):
+            continue
+        merged = " ".join([finding.summary, *finding.evidence])
+        if "kpi_range=" not in merged:
+            continue
+        component = re.search(r"\bcomponent\s*=\s*([A-Za-z0-9_.:-]+)", merged, re.IGNORECASE)
+        reason = re.search(
+            r"candidate_reason\s*=\s*([^,;|\n]+?)(?=\s+[A-Za-z_]+=|$)",
+            merged,
+            re.IGNORECASE,
+        )
+        spread = re.search(r"kpi_range\s*=\s*([0-9]+(?:\.[0-9]+)?)", merged, re.IGNORECASE)
+        if not component or not reason or not spread or float(spread.group(1)) < 5.0:
+            continue
+        key = (component.group(1).lower(), reason.group(1).strip().lower())
+        support = re.search(r"support_count\s*=\s*([0-9]+)", merged, re.IGNORECASE)
+        hypotheses[key] = max(
+            hypotheses.get(key, 0),
+            int(support.group(1)) if support else 0,
+        )
+    if len(hypotheses) == 1:
+        return True
+    ranked = sorted(hypotheses.items(), key=lambda item: item[1], reverse=True)
+    return bool(
+        len(ranked) >= 2
+        and ranked[0][1] >= 3
+        and ranked[0][1] > ranked[1][1]
+        and len({reason for (_, reason), _ in ranked}) == 1
+    )
+
+
+def _has_decisive_direct_log_failure(findings: list[AssessFinding]) -> bool:
+    """Stop before traces when one repeated local return/exception is explicit."""
+    hypotheses: set[tuple[str, str]] = set()
+    for finding in findings:
+        if finding.kind != "anomaly" or not finding.agent.startswith("LogsAgent"):
+            continue
+        merged = " ".join([finding.summary, *finding.evidence])
+        if "propagated_failure=false" not in merged.lower():
+            continue
+        count = re.search(r"failure_signature_count\s*=\s*([0-9]+)", merged, re.IGNORECASE)
+        component = re.search(r"\bcomponent\s*=\s*([A-Za-z0-9_.:-]+)", merged, re.IGNORECASE)
+        reason = re.search(
+            r"candidate_reason\s*=\s*([^,;|\n]+?)(?=\s+[A-Za-z_]+=|$)",
+            merged,
+            re.IGNORECASE,
+        )
+        if not count or int(count.group(1)) < 20 or not component or not reason:
+            continue
+        hypotheses.add((component.group(1).lower(), reason.group(1).strip().lower()))
+    return len(hypotheses) == 1
+
+
 def _extract_json_payload(text: str) -> dict[str, object] | None:
     content = text.strip()
     if not content:
@@ -942,6 +1621,241 @@ def _extract_json_payload(text: str) -> dict[str, object] | None:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _coordinate_findings(
+    *,
+    llm_client: LLMClient,
+    buildspec: BuildSpec,
+    findings: list[AssessFinding],
+) -> CoordinatorDecision | None:
+    """Synthesize a checkpoint from bounded cross-domain evidence."""
+    severity_order = {"high": 3, "medium": 2, "low": 1}
+    ordered = sorted(
+        findings,
+        key=lambda item: (item.kind == "anomaly", severity_order[item.severity]),
+        reverse=True,
+    )
+    evidence = [
+        {
+            "agent": item.agent,
+            "domain": (
+                "metrics"
+                if item.agent.startswith("MetricsAgent")
+                else "trace"
+                if item.agent.startswith("TraceAgent")
+                else "logs"
+            ),
+            "kind": item.kind,
+            "severity": item.severity,
+            "summary": item.summary,
+            "evidence": item.evidence[:4],
+            "source": item.source,
+        }
+        for item in ordered[:36]
+    ]
+    system_prompt = (
+        "You are the RCA coordinator. Reconcile bounded findings from logs, traces, and metrics.\n"
+        "Return the best component, reason, and UNIX occurrence timestamp supported by evidence.\n"
+        "Never use a CSV column name such as PodName, cmdb_id, serviceName, component, or node as the component value.\n"
+        "Prefer explicit component=<value>, candidate_reason=<value>, anomaly peaks, and agreement across domains.\n"
+        "The reason vocabulary is open and non-exhaustive; preserve the telemetry-supported wording.\n"
+        "root_cause_reason must be one concise cause label only, never a sentence or combined explanation.\n"
+        "When candidate_reason=<value> is supported, copy that value exactly into root_cause_reason and put details in rationale.\n"
+        "Use empty strings and root_cause_time=0 for unresolved values.\n"
+        "Request follow-up domains only for genuinely unresolved or weak fields; otherwise return an empty list.\n"
+    )
+    user_prompt = json.dumps(
+        {
+            "window": {
+                "start": buildspec.failure_time_range_ts.start,
+                "end": buildspec.failure_time_range_ts.end,
+            },
+            "requested_unknowns": buildspec.uncertainty.model_dump(),
+            "findings": evidence,
+        },
+        ensure_ascii=False,
+    )
+    try:
+        response = llm_client.complete(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response_format=_COORDINATOR_RESPONSE_FORMAT,
+        )
+    except LLMError:
+        return None
+    payload = _extract_json_payload(response)
+    if payload is None:
+        return None
+    try:
+        decision = CoordinatorDecision.model_validate(payload)
+    except Exception:
+        return None
+
+    forbidden = {
+        "podname",
+        "pod_name",
+        "cmdb_id",
+        "servicename",
+        "service_name",
+        "component",
+        "node",
+        "unknown",
+    }
+    updates: dict[str, object] = {}
+    if decision.root_cause_component.strip().lower() in forbidden:
+        updates["root_cause_component"] = ""
+        updates["unresolved_fields"] = list(
+            dict.fromkeys([*decision.unresolved_fields, "root_cause_component"])
+        )
+    if not (
+        buildspec.failure_time_range_ts.start
+        <= decision.root_cause_time
+        <= buildspec.failure_time_range_ts.end
+    ):
+        updates["root_cause_time"] = 0
+        updates["unresolved_fields"] = list(
+            dict.fromkeys(
+                [
+                    *list(updates.get("unresolved_fields", decision.unresolved_fields)),
+                    "root_cause_time",
+                ]
+            )
+        )
+    explicit_reasons: list[str] = []
+    explicit_hypotheses: list[tuple[int, str, str, int]] = []
+    for finding in findings:
+        finding_component = ""
+        finding_reason = ""
+        for text in [finding.summary, *finding.evidence]:
+            component_match = re.search(
+                r"\bcomponent\s*=\s*([A-Za-z0-9_.:-]+)",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if component_match:
+                finding_component = component_match.group(1).strip()
+            match = re.search(
+                r"candidate_reason\s*=\s*([^,;|\n]+)",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                finding_reason = match.group(1).strip()
+                explicit_reasons.append(finding_reason)
+        if finding.kind == "anomaly" and finding_component and finding_reason:
+            score = {"low": 1, "medium": 2, "high": 3}[finding.severity]
+            if finding.agent.startswith("MetricsAgent"):
+                score += 1
+            numeric_strengths = [
+                float(value)
+                for value in re.findall(
+                    r"(?:pod_cpu_usage_rate_max|max)\s*=\s*([0-9]+(?:\.[0-9]+)?)",
+                    " ".join([finding.summary, *finding.evidence]),
+                    flags=re.IGNORECASE,
+                )
+            ]
+            numeric_strength = max(numeric_strengths, default=0.0)
+            if numeric_strength >= 95.0:
+                score += 4
+            elif numeric_strength >= 80.0:
+                score += 2
+            failure_counts = [
+                int(value)
+                for value in re.findall(
+                    r"failure_signature_count\s*=\s*([0-9]+)",
+                    " ".join([finding.summary, *finding.evidence]),
+                    flags=re.IGNORECASE,
+                )
+            ]
+            failure_count = max(failure_counts, default=0)
+            if failure_count >= 20:
+                score += 4
+            elif failure_count >= 3:
+                score += 2
+            merged_hypothesis = " ".join([finding.summary, *finding.evidence]).lower()
+            if "propagated_failure=true" in merged_hypothesis:
+                score -= 2
+            support_counts = [
+                int(value)
+                for value in re.findall(r"support_count\s*=\s*([0-9]+)", merged_hypothesis)
+            ]
+            score += min(max(support_counts, default=0), 5)
+            expert_scores = [
+                float(value)
+                for value in re.findall(
+                    r"expert_score\s*=\s*([0-9]+(?:\.[0-9]+)?)",
+                    merged_hypothesis,
+                )
+            ]
+            if "independent_evidence=true" in merged_hypothesis:
+                score += 3 + min(int(max(expert_scores, default=0.0)), 7)
+            hypothesis_times = [
+                int(value)
+                for value in re.findall(
+                    r"(?:peak_ts|first_failure_ts)\s*=\s*([0-9]+)",
+                    " ".join([finding.summary, *finding.evidence]),
+                    flags=re.IGNORECASE,
+                )
+            ]
+            explicit_hypotheses.append(
+                (score, finding_component, finding_reason, min(hypothesis_times, default=0))
+            )
+    decision_reason = decision.root_cause_reason.strip().lower()
+    matching_explicit = next(
+        (
+            reason
+            for reason in explicit_reasons
+            if reason.lower() in decision_reason or decision_reason in reason.lower()
+        ),
+        None,
+    )
+    if matching_explicit:
+        updates["root_cause_reason"] = matching_explicit
+    if explicit_hypotheses:
+        grouped_hypotheses: dict[tuple[str, str], list[tuple[int, str, str, int]]] = {}
+        for hypothesis in explicit_hypotheses:
+            _, component, reason, _ = hypothesis
+            grouped_hypotheses.setdefault(
+                (component.lower(), reason.lower()), []
+            ).append(hypothesis)
+        ranked_hypotheses: list[tuple[int, str, str, int]] = []
+        for hypotheses in grouped_hypotheses.values():
+            best = max(hypotheses, key=lambda item: item[0])
+            # Repeated shards corroborate a signal, but boundedly: duplicate
+            # evidence must not overpower a more specific failure signature.
+            corroboration_bonus = min(len(hypotheses) - 1, 2)
+            ranked_hypotheses.append(
+                (
+                    best[0] + corroboration_bonus,
+                    best[1],
+                    best[2],
+                    min((item[3] for item in hypotheses if item[3]), default=0),
+                )
+            )
+        explicit_score, explicit_component, explicit_reason, explicit_time = max(
+            ranked_hypotheses,
+            key=lambda item: item[0],
+        )
+        updates["root_cause_component"] = explicit_component
+        updates["root_cause_reason"] = explicit_reason
+        updates["focus_component"] = explicit_component
+        if buildspec.failure_time_range_ts.start <= explicit_time <= buildspec.failure_time_range_ts.end:
+            updates["root_cause_time"] = explicit_time
+        unresolved = [
+            field
+            for field in list(
+                updates.get("unresolved_fields", decision.unresolved_fields)
+            )
+            if field not in {"root_cause_component", "root_cause_reason"}
+        ]
+        updates["unresolved_fields"] = unresolved
+        updates["confidence"] = "high" if explicit_score >= 3 else decision.confidence
+        updates["rationale"] = (
+            "Structured anomaly evidence takes precedence over indirect symptoms: "
+            f"component={explicit_component}, candidate_reason={explicit_reason}."
+        )
+    return decision.model_copy(update=updates) if updates else decision
 
 
 def _semantic_context_findings(
@@ -967,6 +1881,173 @@ def _semantic_context_findings(
     top_reasons = semantic_summary.get("top_reason_values", [])
     numeric_ranges = semantic_summary.get("numeric_ranges", {})
     observed_bounds = semantic_summary.get("window_observed_time_bounds", {})
+    network_latency = tool_context.get("inter_service_network_latency", [])
+    log_failure_signals = tool_context.get("log_failure_signals", [])
+    long_form_kpi_anomalies = tool_context.get("long_form_kpi_anomalies", [])
+    service_latency_anomalies = tool_context.get("service_latency_anomalies", [])
+
+    if domain == "metrics" and isinstance(numeric_ranges, dict):
+        pod_cpu_max: float | None = None
+        node_cpu_max: float | None = None
+        for column, stats in numeric_ranges.items():
+            normalized_column = telemetry_tools.normalize_header(str(column)).replace("_", "")
+            if "cpuusagerate" not in normalized_column:
+                continue
+            if not isinstance(stats, dict):
+                continue
+            try:
+                value = float(stats.get("max"))
+            except (TypeError, ValueError):
+                continue
+            if "node" in normalized_column:
+                node_cpu_max = value if node_cpu_max is None else max(node_cpu_max, value)
+            else:
+                pod_cpu_max = value if pod_cpu_max is None else max(pod_cpu_max, value)
+        component = ""
+        if isinstance(top_components, list):
+            component = next(
+                (
+                    str(item.get("value", "")).strip()
+                    for item in top_components
+                    if isinstance(item, dict) and str(item.get("value", "")).strip()
+                ),
+                "",
+            )
+        if pod_cpu_max is not None and pod_cpu_max >= 70.0 and component:
+            cpu_reason = (
+                "cpu consumed"
+                if pod_cpu_max >= 95.0 and node_cpu_max is not None and node_cpu_max < 10.0
+                else "cpu contention"
+            )
+            findings.append(
+                AssessFinding(
+                    agent=agent_name,
+                    kind="anomaly",
+                    source=source_path,
+                    summary=(
+                        f"Elevated pod CPU indicates {cpu_reason} for component {component} "
+                        f"(max={pod_cpu_max:.3f}%)."
+                    ),
+                    evidence=[
+                        f"component={component}",
+                        f"pod_cpu_usage_rate_max={pod_cpu_max:.6f}",
+                        f"node_cpu_usage_rate_max={node_cpu_max:.6f}" if node_cpu_max is not None else "node_cpu_usage_rate_max=unknown",
+                        f"candidate_reason={cpu_reason}",
+                    ],
+                    severity="high" if pod_cpu_max >= 80.0 else "medium",
+                )
+            )
+
+    if domain == "logs" and isinstance(log_failure_signals, list):
+        for signal in log_failure_signals:
+            if not isinstance(signal, dict) or int(signal.get("count", 0)) < 3:
+                continue
+            category = str(signal.get("category", ""))
+            component = str(signal.get("component", "")).strip()
+            if not component or category not in {"early_return", "exception"}:
+                continue
+            reason = "return" if category == "early_return" else "exception"
+            findings.append(
+                AssessFinding(
+                    agent=agent_name,
+                    kind="anomaly",
+                    source=source_path,
+                    summary=(
+                        f"Repeated {category.replace('_', ' ')} signature identifies "
+                        f"component {component} (count={signal.get('count')})."
+                    ),
+                    evidence=[
+                        f"component={component}",
+                        f"candidate_reason={reason}",
+                        f"failure_signature_count={signal.get('count')}",
+                        f"propagated_failure={str(bool(signal.get('propagated'))).lower()}",
+                        f"first_failure_ts={signal.get('first_ts')}",
+                        f"sample={signal.get('sample', '')}",
+                    ],
+                    severity="high",
+                )
+            )
+
+    if domain == "metrics" and isinstance(long_form_kpi_anomalies, list):
+        for signal in long_form_kpi_anomalies:
+            if not isinstance(signal, dict):
+                continue
+            component = str(signal.get("component", "")).strip()
+            reason = str(signal.get("reason", "")).strip()
+            if not component or not reason:
+                continue
+            findings.append(
+                AssessFinding(
+                    agent=agent_name,
+                    kind="anomaly",
+                    source=source_path,
+                    summary=(
+                        f"Explicit KPI threshold identifies {reason} on component {component}."
+                    ),
+                    evidence=[
+                        f"component={component}",
+                        f"candidate_reason={reason}",
+                        f"kpi_name={signal.get('kpi_name')}",
+                        f"kpi_value={signal.get('value')}",
+                        f"kpi_min={signal.get('minimum')}",
+                        f"kpi_range={signal.get('range')}",
+                        f"support_count={signal.get('support_count')}",
+                        f"peak_ts={signal.get('timestamp')}",
+                    ],
+                    severity="high",
+                )
+            )
+
+    if domain == "metrics" and isinstance(service_latency_anomalies, list):
+        for signal in service_latency_anomalies:
+            if not isinstance(signal, dict):
+                continue
+            component = str(signal.get("component", "")).strip()
+            if not component:
+                continue
+            findings.append(
+                AssessFinding(
+                    agent=agent_name,
+                    kind="anomaly",
+                    source=source_path,
+                    summary=f"Earliest service latency surge identifies component {component}.",
+                    evidence=[
+                        f"component={component}",
+                        "candidate_reason=container network latency",
+                        f"latency_baseline={signal.get('baseline')}",
+                        f"latency_peak={signal.get('peak')}",
+                        f"kpi_range={float(signal.get('peak', 0.0)) - float(signal.get('baseline', 0.0))}",
+                        f"support_count={signal.get('support_count')}",
+                        f"peak_ts={signal.get('onset_ts')}",
+                    ],
+                    severity="high",
+                )
+            )
+
+    if domain == "trace" and isinstance(network_latency, list):
+        for item in network_latency:
+            if not isinstance(item, dict) or float(item.get("p90_ms", 0.0)) < 200.0:
+                continue
+            component = str(item.get("component", "unknown"))
+            findings.append(
+                AssessFinding(
+                    agent=agent_name,
+                    kind="anomaly",
+                    source=source_path,
+                    summary=(
+                        f"Inter-service network delay detected for component {component} "
+                        f"(p90={item.get('p90_ms')}ms)."
+                    ),
+                    evidence=[
+                        f"component={component}",
+                        "candidate_reason=network delay",
+                        f"network_p90_ms={item.get('p90_ms')}",
+                        f"network_max_ms={item.get('max_ms')}",
+                        f"peak_ts={item.get('peak_ts')}",
+                    ],
+                    severity="high",
+                )
+            )
 
     if component_columns or reason_columns or duration_columns:
         findings.append(
@@ -1085,6 +2166,14 @@ def _derive_preliminary_causes(findings: list[AssessFinding]) -> list[str]:
         causes.append("Application-level errors/exceptions likely contributed to failures.")
     if "latency spike" in merged:
         causes.append("System latency spike observed around the failure window.")
+    # The catalogue is deliberately open. Preserve telemetry-backed anomaly
+    # descriptions as emerging candidates instead of forcing them into known buckets.
+    for finding in findings:
+        if finding.kind != "anomaly" or finding.severity not in {"medium", "high"}:
+            continue
+        candidate = finding.summary.strip()
+        if candidate:
+            causes.append(candidate)
     if not causes:
         causes.append("Insufficient evidence for strong preliminary causes; gather more telemetry.")
     return _dedupe_preserve_order(causes)
@@ -1175,6 +2264,8 @@ def _extract_component_candidates_from_findings(
             return
         low = token.lower()
         if low in stopwords:
+            return
+        if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", low):
             return
         canonical = known_lut.get(low, token)
         candidates.append(canonical)
@@ -1292,10 +2383,11 @@ def _format_component_memory_context(
 
 
 def _discover_targets_for_template(buildspec: BuildSpec, template: AgentTemplate) -> list[Path]:
-    """Discover one or more targets for a template within the incident date directory.
+    """Resolve evidence explicitly selected for this incident.
 
-    The primary BuildSpec target is always included first, then additional files of the same
-    domain are added when found. This enables dynamic repeated instantiation per domain.
+    A validated BuildSpec is authoritative. An empty list means that the signal family is
+    unavailable. Scanning the date directory would both override that meaning and risk
+    mixing evidence unrelated to the selected incident.
     """
     raw_primary = getattr(buildspec, template.target_field)
     primary_values: list[str]
@@ -1303,7 +2395,6 @@ def _discover_targets_for_template(buildspec: BuildSpec, template: AgentTemplate
         primary_values = [str(item) for item in raw_primary if str(item).strip()]
     else:
         primary_values = [str(raw_primary)]
-    date_dir = Path(buildspec.filename_date_directory)
     candidates: list[Path] = []
     seen: set[str] = set()
 
@@ -1317,32 +2408,32 @@ def _discover_targets_for_template(buildspec: BuildSpec, template: AgentTemplate
     for primary in primary_values:
         add_path(Path(primary))
 
-    if date_dir.exists() and date_dir.is_dir():
-        keywords = _template_keywords(template)
-        allowed_suffixes = {".csv", ".log", ".txt", ".json", ".tsv"}
-        extra: list[Path] = []
-        for path in date_dir.rglob("*"):
-            if not path.is_file():
-                continue
-            lowered = path.as_posix().lower()
-            if path.suffix and path.suffix.lower() not in allowed_suffixes:
-                continue
-            if any(token in lowered for token in keywords):
-                extra.append(path.resolve())
-        for path in sorted(extra, key=lambda p: str(p)):
-            add_path(path)
-
     return candidates
 
 
-def _template_keywords(template: AgentTemplate) -> tuple[str, ...]:
-    if template.domain == "logs":
-        return ("log", "logs")
-    if template.domain == "trace":
-        return ("trace", "span")
-    if template.domain == "metrics":
-        return ("metric", "metrics", "cpu", "latency")
-    return tuple()
+def _targets_for_component_need(
+    *,
+    template: AgentTemplate,
+    targets: list[Path],
+    component: str,
+) -> list[Path]:
+    """Route a component investigation need only to relevant evidence sources."""
+    if template.domain != "metrics":
+        # Logs and traces are time-sharded; each shard may contain the component.
+        return list(targets)
+
+    component_key = component.strip().lower()
+    service_key = re.sub(r"-[a-z0-9]{8,12}-[a-z0-9]{5}$", "", component_key)
+    tokens = [token for token in {component_key, service_key} if len(token) >= 3]
+    matching = [
+        target
+        for target in targets
+        if any(token in target.name.lower() for token in tokens)
+    ]
+    # OpenRCA aggregates many components in generic metric files such as
+    # metric_container.csv. In that layout the analyzer filters cached rows by
+    # semantic component columns rather than by filename.
+    return matching or list(targets)
 
 
 _EXECUTOR_KB_FALLBACK = """

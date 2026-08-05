@@ -296,7 +296,9 @@ def resolve_db_url(explicit_db_url: str | None = None) -> str:
     env_url = os.getenv("ASSESS_DB_URL", "").strip()
     if env_url:
         return env_url
-    default_path = (Path.cwd() / "output" / "assess.db").resolve()
+    version = os.getenv("AWARE_RCA_VERSION", "v2").strip().lower()
+    filename = "assess_v3.db" if version == "v3" else "assess.db"
+    default_path = (Path.cwd() / "output" / filename).resolve()
     return f"sqlite:///{default_path}"
 
 

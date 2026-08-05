@@ -85,9 +85,12 @@ class BuildSpec(BaseModel):
     uncertainty: Uncertainty
     objective: str = Field(min_length=10)
     filename_date_directory: str
-    absolute_log_file: list[str] = Field(min_length=1)
-    absolute_trace_file: list[str] = Field(min_length=1)
-    absolute_metrics_file: list[str] = Field(min_length=1)
+    # Some observability datasets legitimately omit one signal family (OpenRCA
+    # Telecom has traces and metrics, but no logs). The keys remain mandatory;
+    # an empty list explicitly records that the domain is unavailable.
+    absolute_log_file: list[str]
+    absolute_trace_file: list[str]
+    absolute_metrics_file: list[str]
 
     @model_validator(mode="after")
     def validate_contract(self) -> "BuildSpec":

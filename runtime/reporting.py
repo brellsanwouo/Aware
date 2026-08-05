@@ -307,6 +307,22 @@ def _infer_root_cause_time(
     task_results: list[AgentTaskResult],
     semantic_ts_candidates: list[int],
 ) -> tuple[int | str, list[str], str]:
+    start_ts = int(buildspec.failure_time_range_ts.start)
+    end_ts = int(buildspec.failure_time_range_ts.end)
+    network_peaks: list[int] = []
+    for finding in findings:
+        if finding.kind != "anomaly" or "network delay" not in finding.summary.lower():
+            continue
+        for evidence in finding.evidence:
+            match = re.fullmatch(r"peak_ts=(\d{10})", evidence.strip())
+            if match:
+                value = int(match.group(1))
+                if start_ts <= value <= end_ts:
+                    network_peaks.append(value)
+    if network_peaks:
+        resolved = min(network_peaks)
+        return resolved, [f"timestamp_from_network_latency_peak={resolved}"], "known"
+
     candidates = _find_time_candidates(buildspec, findings, preferred_prefixes=("LogsAgent", "TraceAgent", "MetricsAgent"))
     if candidates:
         resolved = min(candidates)
@@ -354,15 +370,80 @@ def _component_tokens(findings: list[AssessFinding], prefixes: tuple[str, ...]) 
         if prefixes and not any(finding.agent.startswith(prefix) for prefix in prefixes):
             continue
         for text in _iter_texts(finding):
+            for candidate in re.findall(r"\b[a-z][a-z0-9]*(?:-[a-z0-9]+){2,}\b", text or ""):
+                if any(char.isdigit() for char in candidate):
+                    counter[candidate] += 1
             for token in _COMPONENT_TOKEN_RE.findall(text or ""):
+                if token.lower() in {"podclientlatencyp90", "podserverlatencyp90"}:
+                    continue
                 counter[token] += 1
     return counter
+
+
+def _component_from_finding(finding: AssessFinding) -> str | None:
+    merged = "\n".join([finding.summary, *finding.evidence])
+    forbidden = {
+        "podname",
+        "pod_name",
+        "cmdb_id",
+        "servicename",
+        "service_name",
+        "component",
+        "instance",
+        "host",
+        "node",
+        "tc",
+        "unknown",
+        "unresolved",
+    }
+    patterns = (
+        r"\bcomponent\s*=\s*([A-Za-z0-9_.:-]+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, merged, flags=re.IGNORECASE)
+        if not match:
+            continue
+        component = match.group(1).rstrip(".,;:")
+        if component.lower() not in forbidden:
+            return component
+    return None
 
 
 def _infer_root_cause_component(
     findings: list[AssessFinding],
     semantic_component_counter: Counter[str],
 ) -> tuple[str, list[str], str]:
+    cpu_candidates: list[tuple[float, AssessFinding, str]] = []
+    for finding in findings:
+        merged = " ".join(_iter_texts(finding)).lower()
+        if (
+            finding.kind != "anomaly"
+            or not finding.agent.startswith("MetricsAgent")
+            or "cpu" not in merged
+            or "candidate_reason=cpu " not in merged
+        ):
+            continue
+        component = _component_from_finding(finding)
+        if not component:
+            continue
+        values = re.findall(r"(?:max|pod_cpu_usage_rate_max)=([0-9]+(?:\.[0-9]+)?)", merged)
+        strength = max((float(value) for value in values), default=0.0)
+        cpu_candidates.append((strength, finding, component))
+    if cpu_candidates:
+        strength, finding, component = max(cpu_candidates, key=lambda item: item[0])
+        return (
+            component,
+            [f"derived_from={finding.agent}:explicit_cpu_evidence", f"cpu_signal={strength}"],
+            "known",
+        )
+
+    for finding in findings:
+        if finding.kind != "anomaly" or "network delay" not in finding.summary.lower():
+            continue
+        component = _component_from_finding(finding)
+        if component:
+            return component, [f"derived_from={finding.agent}:network_latency_evidence"], "known"
+
     # Prioritize trace evidence to approximate downstream-component selection.
     for prefixes, label in (
         (("TraceAgent",), "trace_priority"),
@@ -391,14 +472,32 @@ def _infer_root_cause_reason(
     preliminary_causes: list[str],
     semantic_reason_counter: Counter[str],
 ) -> tuple[str, list[str], str]:
-    log_anomalies = [item for item in findings if item.agent.startswith("LogsAgent") and item.kind == "anomaly"]
+    anomalies = [item for item in findings if item.kind == "anomaly"]
+    for finding in anomalies:
+        merged = " ".join(_iter_texts(finding))
+        match = re.search(r"candidate_reason\s*=\s*([^,;|\n]+)", merged, re.IGNORECASE)
+        if match:
+            return match.group(1).strip(), [f"derived_from={finding.agent}:explicit_reason"], "known"
+    for finding in anomalies:
+        lowered = " ".join(_iter_texts(finding)).lower()
+        if finding.agent.startswith("MetricsAgent") and (
+            "cpu saturation" in lowered or "cpu contention" in lowered
+        ):
+            return "cpu contention", [f"derived_from={finding.agent}:cpu_evidence"], "known"
+    for finding in anomalies:
+        lowered = " ".join(_iter_texts(finding)).lower()
+        if "network" in lowered and ("delay" in lowered or "latency" in lowered):
+            return "network delay", [f"derived_from={finding.agent}:network_latency_evidence"], "known"
+        if "cpu saturation" in lowered or "cpu contention" in lowered:
+            return "cpu contention", [f"derived_from={finding.agent}:cpu_evidence"], "known"
+
+    log_anomalies = [item for item in anomalies if item.agent.startswith("LogsAgent")]
     if log_anomalies:
         return log_anomalies[0].summary, ["derived_from_logs_anomaly"], "known"
 
     if preliminary_causes:
         return preliminary_causes[0], ["derived_from_preliminary_causes_rank_1"], "known"
 
-    anomalies = [item for item in findings if item.kind == "anomaly"]
     if anomalies:
         return anomalies[0].summary, ["derived_from_top_anomaly_summary"], "unknown"
 
@@ -429,11 +528,23 @@ def build_assessment_output(buildspec: BuildSpec, executor_result: ExecutorRunRe
     requested_fields = _requested_fields(buildspec)
     task_scope = _TASK_SCOPE_MAP.get(buildspec.task_type, ())
     unknown_fields = _unknown_fields_from_buildspec(buildspec)
-    (
-        semantic_component_counter,
-        semantic_reason_counter,
-        semantic_ts_candidates,
-    ) = _collect_window_semantic_fallback(buildspec)
+    coordinator = executor_result.coordinator_decision
+    coordinator_complete = bool(
+        coordinator is not None
+        and coordinator.root_cause_component
+        and coordinator.root_cause_reason
+        and coordinator.root_cause_time
+    )
+    if coordinator_complete:
+        semantic_component_counter = Counter()
+        semantic_reason_counter = Counter()
+        semantic_ts_candidates: list[int] = []
+    else:
+        (
+            semantic_component_counter,
+            semantic_reason_counter,
+            semantic_ts_candidates,
+        ) = _collect_window_semantic_fallback(buildspec)
 
     root_cause_time, time_evidence, time_uncertainty = _infer_root_cause_time(
         buildspec,
@@ -450,6 +561,48 @@ def build_assessment_output(buildspec: BuildSpec, executor_result: ExecutorRunRe
         preliminary_causes,
         semantic_reason_counter,
     )
+    if coordinator is not None:
+        if coordinator.root_cause_component:
+            root_cause_component = coordinator.root_cause_component
+            component_evidence = [
+                "derived_from=coordinator_cross_domain_synthesis",
+                coordinator.rationale,
+            ]
+            component_uncertainty = "known"
+        if coordinator.root_cause_reason:
+            root_cause_reason = coordinator.root_cause_reason
+            reason_evidence = [
+                "derived_from=coordinator_cross_domain_synthesis",
+                coordinator.rationale,
+            ]
+            reason_uncertainty = "known"
+        if coordinator.root_cause_time:
+            window_duration = (
+                buildspec.failure_time_range_ts.end - buildspec.failure_time_range_ts.start
+            )
+            # Short Nezha windows score anomaly onset. Long OpenRCA windows need
+            # the explicit anomaly timestamp rather than the broad window start.
+            if window_duration <= 180:
+                existing_time = (
+                    int(root_cause_time)
+                    if isinstance(root_cause_time, int)
+                    else coordinator.root_cause_time
+                )
+                root_cause_time = min(existing_time, coordinator.root_cause_time)
+            else:
+                root_cause_time = coordinator.root_cause_time
+            time_evidence = [
+                "derived_from=earliest_supported_onset_and_coordinator_synthesis",
+                coordinator.rationale,
+            ]
+            time_uncertainty = "known"
+
+    supporting_evidence = _supporting_evidence(findings)
+    if coordinator is not None and coordinator.rationale:
+        supporting_evidence = [
+            f"Coordinator: {coordinator.rationale}",
+            *supporting_evidence,
+        ][:6]
 
     root_cause_synthesis = {
         "task_type": "root_cause_synthesis",
@@ -478,8 +631,12 @@ def build_assessment_output(buildspec: BuildSpec, executor_result: ExecutorRunRe
             "root_cause_component": root_cause_component,
             "root_cause_reason": root_cause_reason,
             "root_cause_time": root_cause_time,
-            "confidence": _confidence_label(executor_result.confidence),
-            "supporting_evidence": _supporting_evidence(findings),
+            "confidence": (
+                coordinator.confidence
+                if coordinator is not None
+                else _confidence_label(executor_result.confidence)
+            ),
+            "supporting_evidence": supporting_evidence,
         },
         "uncertainty": {
             "root_cause_time": time_uncertainty,
@@ -502,6 +659,12 @@ def build_assessment_output(buildspec: BuildSpec, executor_result: ExecutorRunRe
 
     return {
         "summary": executor_result.summary,
+        "execution_mode": executor_result.execution_mode,
+        "causal_graph": (
+            executor_result.causal_graph.model_dump(mode="json")
+            if executor_result.causal_graph is not None
+            else {"nodes": [], "edges": [], "root_node_id": ""}
+        ),
         "buildspec_resolution_scope": {
             "task_type": buildspec.task_type,
             "task_scope_fields": list(task_scope),

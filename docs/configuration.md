@@ -18,8 +18,13 @@ Aware currently uses an OpenAI-compatible provider.
 | --- | --- | --- |
 | `PARSER_MAX_ATTEMPTS` | `5` | Maximum parser repair attempts. |
 | `EXECUTOR_MAX_AGENTS` | `5` | Global limit for instantiated executor sub-agents. |
+| `EXECUTOR_MAX_EXPANSIONS` | `2` | Maximum focused follow-up agents after the initial domain coverage; clamped to 0–4. |
 | `AWARE_PARSER_KB_FILE` | `knowledge/parser_buildspec_kb.md` | Parser knowledge file path. |
 | `AWARE_EXECUTOR_KB_FILE` | `knowledge/executor_rca_kb.md` | Executor knowledge file path. |
+| `AWARE_EXECUTOR_V3_KB_FILE` | `knowledge/executor_rca_v3_kb.md` | V3 mechanism-oriented technical knowledge. |
+| `AWARE_RCA_VERSION` | `v2` | Selects the stable `v2` or experimental `v3` RCA strategy. |
+
+Seed analysis is demand-driven: metrics run first, followed by logs and traces only while the diagnosis still needs them. The safety limit is a ceiling, not a target agent count. V3 uses `sqlite:///output/assess_v3.db` by default; V2 uses `sqlite:///output/assess.db`.
 
 ## Runtime Toggles
 

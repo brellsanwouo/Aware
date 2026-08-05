@@ -16,6 +16,7 @@ dependencies = [
   "requests>=2.31,<3.0",
   "fastapi>=0.111,<1.0",
   "uvicorn>=0.30,<1.0",
+  "Pillow>=10.0,<12.0",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +30,9 @@ rca = "cli.main:run"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["agents*", "models*", "aware_models*", "llm*", "runtime*", "cli*", "ui*", "tools*", "templates*"]
+
+[tool.setuptools.package-data]
+ui = ["index.html"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

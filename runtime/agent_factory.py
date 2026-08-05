@@ -49,21 +49,28 @@ def create_parser_agent(llm_client: LLMClient | None, max_attempts: int = 5) -> 
 def get_executor_agent(llm_client: LLMClient | None = None) -> ExecutorAgent:
     """Return persistent ExecutorAgent instance."""
     global _EXECUTOR_AGENT
-    kb_file = os.getenv("AWARE_EXECUTOR_KB_FILE", "knowledge/executor_rca_kb.md")
     enable_reasoning = env_bool("AWARE_ENABLE_REASONING", True)
     enable_memory = env_bool("AWARE_ENABLE_MEMORY", True)
+    execution_mode = os.getenv("AWARE_RCA_VERSION", "v2").strip().lower()
+    kb_file = (
+        os.getenv("AWARE_EXECUTOR_V3_KB_FILE", "knowledge/executor_rca_v3_kb.md")
+        if execution_mode == "v3"
+        else os.getenv("AWARE_EXECUTOR_KB_FILE", "knowledge/executor_rca_kb.md")
+    )
     if _EXECUTOR_AGENT is None:
         _EXECUTOR_AGENT = ExecutorAgent(
             llm_client=llm_client,
             knowledge_file=kb_file,
             enable_reasoning=enable_reasoning,
             enable_memory=enable_memory,
+            execution_mode=execution_mode,
         )
     else:
         _EXECUTOR_AGENT.llm_client = llm_client
         _EXECUTOR_AGENT.knowledge_file = kb_file
         _EXECUTOR_AGENT.enable_reasoning = enable_reasoning
         _EXECUTOR_AGENT.enable_memory = enable_memory
+        _EXECUTOR_AGENT.execution_mode = "v3" if execution_mode == "v3" else "v2"
     agent = _EXECUTOR_AGENT
     if not isinstance(agent, BaseAgent):
         raise TypeError("ExecutorAgent must inherit from google.adk.agents.BaseAgent.")

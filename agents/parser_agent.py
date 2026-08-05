@@ -75,6 +75,8 @@ class ParserAgent(Agent):
         user_query: str,
         repository_path: str,
         on_event: Callable[[ParserEvent], None] | None = None,
+        timezone_offset_minutes: int = 480,
+        dataset_profile: str = "generic",
     ) -> ParserRunResult:
         """Generate BuildSpec with retry-until-valid workflow."""
         repo = Path(repository_path)
@@ -88,6 +90,7 @@ class ParserAgent(Agent):
                 f"ParserAgent received request. repository={repo}; max_attempts={self.max_attempts}; "
                 f"reasoning={'on' if self.enable_reasoning else 'off'}; "
                 f"memory={'on' if self.enable_memory else 'off'}."
+                f" timezone_offset_minutes={timezone_offset_minutes}; dataset={dataset_profile}."
             ),
         )
         self._emit(
@@ -108,14 +111,23 @@ class ParserAgent(Agent):
                 on_event,
                 phase="explore_repo",
                 recipient="Runtime",
-                content="Listing repository files...",
+                content="Listing a bounded sample of repository files...",
             )
-            for rel_path in repository_files:
+            event_file_limit = 20
+            for rel_path in repository_files[:event_file_limit]:
                 self._emit(
                     on_event,
-                    phase="read_file",
+                    phase="discover_file",
                     recipient="Runtime",
-                    content=f"read file <{rel_path}>",
+                    content=f"discovered path <{rel_path}> (content not read)",
+                )
+            omitted = len(repository_files) - event_file_limit
+            if omitted > 0:
+                self._emit(
+                    on_event,
+                    phase="discover_file_summary",
+                    recipient="Runtime",
+                    content=f"Repository scan retained all paths internally; omitted {omitted} per-file UI events.",
                 )
 
         errors_by_attempt: list[list[str]] = []
@@ -134,6 +146,66 @@ class ParserAgent(Agent):
 
         llm_client = self._ensure_llm_client(on_event)
 
+        # Batch catalogues already provide a canonical date/time request and an
+        # explicit dataset profile. File selection and BuildSpec validation are
+        # deterministic here; asking an LLM to repeat that work adds latency and
+        # variability without adding RCA evidence. Free-form/generic requests
+        # continue through the retrying LLM parser below.
+        profile = dataset_profile.strip().lower()
+        canonical_incident = bool(
+            profile in {"nezha", "openrca_bank", "openrca_market", "openrca_telecom"}
+            and re.search(r"\b\d{4}-\d{2}-\d{2}\b", user_query)
+            and len(re.findall(r"\b\d{1,2}:\d{2}(?::\d{2})?\b", user_query)) >= 2
+        )
+        if canonical_incident:
+            payload = _buildspec_payload_without_llm(
+                user_query=user_query,
+                repository_path=repo,
+                repository_files=repository_files,
+                timezone_offset_minutes=timezone_offset_minutes,
+                dataset_profile=profile,
+            )
+            validation = validate_buildspec(
+                payload=payload,
+                expected_repository_path=str(repo),
+            )
+            selected_paths = {
+                "absolute_log_file": _as_str_list(payload.get("absolute_log_file")),
+                "absolute_trace_file": _as_str_list(payload.get("absolute_trace_file")),
+                "absolute_metrics_file": _as_str_list(payload.get("absolute_metrics_file")),
+            }
+            path_errors = _validate_selected_paths_against_scan(
+                selected_paths=selected_paths,
+                repository_path=repo,
+                repository_files=repository_files,
+            )
+            if validation.is_valid and not path_errors and validation.normalized is not None:
+                self._emit(
+                    on_event,
+                    phase="deterministic_buildspec",
+                    recipient="Runtime",
+                    content=(
+                        f"Canonical {profile} incident parsed without a Parser LLM call; "
+                        f"selected logs={len(selected_paths['absolute_log_file'])}, "
+                        f"traces={len(selected_paths['absolute_trace_file'])}, "
+                        f"metrics={len(selected_paths['absolute_metrics_file'])}."
+                    ),
+                )
+                self._emit(
+                    on_event,
+                    phase="success",
+                    recipient="Runtime",
+                    content="BuildSpec validated successfully through the canonical incident fast path.",
+                )
+                return ParserRunResult(
+                    buildspec=validation.normalized,
+                    attempts=0,
+                    errors_by_attempt=[],
+                    raw_responses=[],
+                    repository_files=repository_files,
+                    selected_paths=selected_paths,
+                )
+
         for attempt in range(1, self.max_attempts + 1):
             self._emit(
                 on_event,
@@ -147,6 +219,7 @@ class ParserAgent(Agent):
                 repository_files=repository_files,
                 previous_errors=previous_errors,
                 knowledge_text=knowledge_text,
+                timezone_offset_minutes=timezone_offset_minutes,
             )
             try:
                 response_text = llm_client.complete(
@@ -190,6 +263,8 @@ class ParserAgent(Agent):
                 repository_path=repo,
                 repository_files=repository_files,
                 user_query=user_query,
+                timezone_offset_minutes=timezone_offset_minutes,
+                dataset_profile=dataset_profile,
             )
             if normalized_payload != payload:
                 self._emit(
@@ -320,6 +395,7 @@ class ParserAgent(Agent):
         repository_files: list[str],
         previous_errors: list[str],
         knowledge_text: str,
+        timezone_offset_minutes: int,
     ) -> tuple[str, str]:
         system_prompt = (
             "You are ParserAgent for RCA Assess.\n"
@@ -330,6 +406,7 @@ class ParserAgent(Agent):
             "Use repository_path exactly; all output paths must be absolute and anchored to repository_path.\n"
             "You must decide ALL fields yourself from user_query and repository_files (no placeholders).\n"
             f"Reasoning mode: {'deep' if self.enable_reasoning else 'fast'}.\n"
+            f"Interpret user dates/times with UTC offset {timezone_offset_minutes:+d} minutes.\n"
             "Follow these domain instructions exactly:\n"
             f"{knowledge_text}\n"
         )
@@ -346,7 +423,8 @@ class ParserAgent(Agent):
             f"{files_section}\n"
             "goal=Generate a valid BuildSpec JSON.\n"
             "File-path rule:\n"
-            "- For absolute_log_file, absolute_trace_file, absolute_metrics_file, output arrays (1..n) of matching files from repository_files.\n"
+            "- For absolute_log_file, absolute_trace_file, absolute_metrics_file, output arrays (0..n) of matching files from repository_files.\n"
+            "- Use [] only when that telemetry family has no matching file in repository_files.\n"
             "- If multiple files are relevant in the selected date scope, include all of them (do not force single-file output).\n"
             "- Use a single file only when there is one clear candidate.\n"
             "- Prefer explicit names/types: logs*, *.log*, trace*, span*, metric*, cpu*, latency*.\n"
@@ -407,6 +485,8 @@ def _normalize_candidate_payload(
     repository_path: Path,
     user_query: str,
     repository_files: list[str] | None = None,
+    timezone_offset_minutes: int = 480,
+    dataset_profile: str = "generic",
 ) -> dict[str, object]:
     # Important: this function must NOT decide RCA semantics.
     # Semantic decisions are delegated to the LLM.
@@ -451,6 +531,7 @@ def _normalize_candidate_payload(
             date_value=date_value,
             start_time=start_hms,
             end_time=end_hms,
+            timezone_offset_minutes=timezone_offset_minutes,
         )
         normalized["failure_time_range_ts"] = {"start": start_ts, "end": end_ts}
 
@@ -512,6 +593,23 @@ def _normalize_candidate_payload(
         elif isinstance(raw, str) and raw.strip():
             normalized[path_key] = str(_normalize_absolute_path(raw, repository_path))
 
+    if dataset_profile.strip().lower() == "nezha":
+        _apply_nezha_file_selection(
+            normalized=normalized,
+            repository_path=repository_path,
+            repository_files=repository_files or [],
+            date_value=date_value,
+            start_hms=start_hms,
+            end_hms=end_hms,
+        )
+    elif dataset_profile.strip().lower().startswith("openrca_"):
+        _apply_openrca_file_selection(
+            normalized=normalized,
+            repository_path=repository_path,
+            repository_files=repository_files or [],
+            date_value=date_value,
+        )
+
     # Keep telemetry file lists focused on the target filename_date when possible.
     for path_key in ("absolute_log_file", "absolute_trace_file", "absolute_metrics_file"):
         values = _as_str_list(normalized.get(path_key))
@@ -522,6 +620,101 @@ def _normalize_candidate_payload(
             normalized[path_key] = focused
 
     return normalized
+
+
+def _apply_nezha_file_selection(
+    *,
+    normalized: dict[str, object],
+    repository_path: Path,
+    repository_files: list[str],
+    date_value: str,
+    start_hms: str | None,
+    end_hms: str | None,
+) -> None:
+    """Select Nezha shards deterministically without reading fault labels."""
+    if not date_value or not start_hms or not end_hms:
+        return
+    date_marker = f"/rca_data/{date_value}/"
+    dated = [item for item in repository_files if date_marker in f"/{item}"]
+    if not dated:
+        return
+
+    midnight = datetime.strptime("00:00:00", "%H:%M:%S")
+    start_seconds = int(
+        (datetime.strptime(start_hms, "%H:%M:%S") - midnight).total_seconds()
+    )
+    end_seconds = int(
+        (datetime.strptime(end_hms, "%H:%M:%S") - midnight).total_seconds()
+    )
+
+    def in_window_shard(rel: str, domain: str) -> bool:
+        if f"/{domain}/" not in f"/{rel}":
+            return False
+        match = re.search(r"/(\d{2})_(\d{2})_(?:log|trace)\.csv$", f"/{rel}")
+        if not match:
+            return False
+        shard_seconds = int(match.group(1)) * 3600 + int(match.group(2)) * 60
+        return start_seconds - 60 <= shard_seconds <= end_seconds
+
+    logs = [str((repository_path / rel).resolve()) for rel in dated if in_window_shard(rel, "log")]
+    traces = [str((repository_path / rel).resolve()) for rel in dated if in_window_shard(rel, "trace")]
+    metrics = [
+        str((repository_path / rel).resolve())
+        for rel in dated
+        if "/metric/" in f"/{rel}" and rel.lower().endswith(".csv")
+    ]
+    if logs:
+        normalized["absolute_log_file"] = sorted(logs)
+    if traces:
+        normalized["absolute_trace_file"] = sorted(traces)
+    if metrics:
+        normalized["absolute_metrics_file"] = sorted(metrics)
+
+    sample = (logs or traces or metrics)[0] if (logs or traces or metrics) else ""
+    if sample:
+        marker = f"{Path('rca_data') / date_value}"
+        prefix = sample.split(marker, 1)[0]
+        normalized["filename_date_directory"] = str(Path(prefix) / marker)
+
+
+def _apply_openrca_file_selection(
+    *,
+    normalized: dict[str, object],
+    repository_path: Path,
+    repository_files: list[str],
+    date_value: str,
+) -> None:
+    """Select every available OpenRCA signal file for one incident date."""
+    if not date_value:
+        return
+    filename_date = date_value.replace("-", "_")
+    dated = [
+        rel
+        for rel in repository_files
+        if filename_date in Path(rel).parts and rel.lower().endswith(".csv")
+    ]
+    if not dated:
+        return
+
+    domains = {
+        "absolute_log_file": "/log/",
+        "absolute_trace_file": "/trace/",
+        "absolute_metrics_file": "/metric/",
+    }
+    for field, marker in domains.items():
+        normalized[field] = sorted(
+            str((repository_path / rel).resolve())
+            for rel in dated
+            if marker in f"/{rel.lower()}"
+        )
+
+    dated_directories = {
+        (repository_path / rel).resolve().parent.parent
+        for rel in dated
+        if any(marker in f"/{rel.lower()}" for marker in domains.values())
+    }
+    if len(dated_directories) == 1:
+        normalized["filename_date_directory"] = str(next(iter(dated_directories)))
 
 
 def _coerce_date(value: object, query: str) -> str | None:
@@ -1054,8 +1247,13 @@ def _validate_selected_paths_against_scan(
 
     for field, keywords in categories.items():
         values = _as_str_list(selected_paths.get(field, []))
+        candidate_exists = any(
+            any(token in item.lower() for token in keywords)
+            for item in repository_files
+        )
         if not values:
-            errors.append(f"{field} is missing.")
+            if candidate_exists:
+                errors.append(f"{field} is missing while matching repository files exist.")
             continue
         for idx, path_value in enumerate(values):
             if path_value not in available:
@@ -1063,7 +1261,6 @@ def _validate_selected_paths_against_scan(
                 continue
             lowered = path_value.lower()
             if not any(token in lowered for token in keywords):
-                candidate_exists = any(any(token in item.lower() for token in keywords) for item in repository_files)
                 if candidate_exists:
                     errors.append(f"{field}[{idx}] does not match expected {field} semantics.")
 
@@ -1207,6 +1404,8 @@ def _buildspec_payload_without_llm(
     user_query: str,
     repository_path: Path,
     repository_files: list[str],
+    timezone_offset_minutes: int = 480,
+    dataset_profile: str = "generic",
 ) -> dict[str, object]:
     """Build a valid payload from deterministic parsing when reasoning is disabled."""
     date_value = _coerce_date(None, user_query) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1270,6 +1469,8 @@ def _buildspec_payload_without_llm(
         repository_path=repository_path,
         user_query=user_query,
         repository_files=repository_files,
+        timezone_offset_minutes=timezone_offset_minutes,
+        dataset_profile=dataset_profile,
     )
 
 

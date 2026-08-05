@@ -57,3 +57,14 @@ def test_validate_buildspec_accepts_multiple_absolute_files_per_domain() -> None
     result = validate_buildspec(payload, expected_repository_path="/agentfactory/data/Bank/telemetry")
     assert result.is_valid is True
     assert result.normalized is not None
+
+
+def test_validate_buildspec_accepts_an_explicitly_unavailable_signal_domain() -> None:
+    payload = _payload()
+    payload["absolute_log_file"] = []
+
+    result = validate_buildspec(payload)
+
+    assert result.is_valid is True
+    assert result.normalized is not None
+    assert result.normalized.absolute_log_file == []

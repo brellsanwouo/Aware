@@ -80,17 +80,14 @@ BUILDSPEC_RESPONSE_FORMAT: dict[str, Any] = {
                 },
                 "absolute_log_file": {
                     "type": "array",
-                    "minItems": 1,
                     "items": {"type": "string", "pattern": "^/.*"},
                 },
                 "absolute_trace_file": {
                     "type": "array",
-                    "minItems": 1,
                     "items": {"type": "string", "pattern": "^/.*"},
                 },
                 "absolute_metrics_file": {
                     "type": "array",
-                    "minItems": 1,
                     "items": {"type": "string", "pattern": "^/.*"},
                 },
             },

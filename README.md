@@ -53,7 +53,18 @@ Parser + Executor in a single command:
 ```bash
 aware assess \
   --query "On 2021-03-04 between 18:30:00 and 19:00:00 checkout timeout" \
-  --repo /path/to/repository
+  --repo /path/to/repository \
+  --rca-version v3
+```
+
+Run a complete CSV batch with per-incident PNG causal graphs:
+
+```bash
+aware batch \
+  --problems-csv /path/to/problems.csv \
+  --rca-version v3 \
+  --results-csv output/results.csv \
+  --graph-dir output/graphs
 ```
 
 ## UI Conversation Live
@@ -62,6 +73,14 @@ Start the UI:
 
 ```bash
 aware ui --host 127.0.0.1 --port 8787
+```
+
+To compare the stable V2 with the experimental V3 mixture of independent
+experts and its causal graph, start them on separate ports:
+
+```bash
+aware ui --rca-version v2 --host 127.0.0.1 --port 8787
+aware ui --rca-version v3 --host 127.0.0.1 --port 8788
 ```
 
 Then open:
@@ -160,6 +179,7 @@ Useful `.env` variables:
 - `AWARE_PARSER_KB_FILE` (optional, default: `knowledge/parser_buildspec_kb.md`)
 - `AWARE_EXECUTOR_KB_FILE` (optional, default: `knowledge/executor_rca_kb.md`)
 - `EXECUTOR_MAX_AGENTS` (optional: global limit for instantiated sub-agents)
+- `EXECUTOR_MAX_EXPANSIONS` (optional: focused follow-ups after initial domain coverage; default `2`, maximum `4`)
   - recommended V1 default: `5`
 - `AWARE_ENABLE_REASONING` (`true|false`, default `true`)
   - `false`: the LLM is still used, but in fast reasoning mode (more direct prompts)

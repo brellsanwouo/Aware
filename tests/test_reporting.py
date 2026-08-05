@@ -4,7 +4,27 @@ from __future__ import annotations
 
 from aware_models.buildspec import BuildSpec
 from aware_models.executor import AgentTaskResult, AssessFinding, ExecutorRunResult
+from runtime import reporting as reporting_module
 from runtime.reporting import build_assessment_output
+
+
+def test_component_extraction_does_not_return_linking_word() -> None:
+    finding = AssessFinding(
+        agent="MetricsAgent",
+        kind="anomaly",
+        source="metric.csv",
+        summary="The affected component is frontend-579b9bff58-t2dbm due to CPU contention.",
+        evidence=["component=frontend-579b9bff58-t2dbm"],
+        severity="high",
+    )
+
+    assert reporting_module._component_from_finding(finding) == "frontend-579b9bff58-t2dbm"
+    assert reporting_module._infer_root_cause_component([finding], reporting_module.Counter())[0] == (
+        "frontend-579b9bff58-t2dbm"
+    )
+    assert reporting_module._infer_root_cause_reason([finding], [], reporting_module.Counter())[0] == (
+        "cpu contention"
+    )
 
 
 def test_build_assessment_output_has_explicit_sections_and_no_unknown() -> None:

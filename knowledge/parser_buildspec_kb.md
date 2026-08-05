@@ -14,9 +14,9 @@ Required keys (all mandatory):
 - `uncertainty`
 - `objective`
 - `filename_date_directory`
-- `absolute_log_file` (array of 1..n absolute paths)
-- `absolute_trace_file` (array of 1..n absolute paths)
-- `absolute_metrics_file` (array of 1..n absolute paths)
+- `absolute_log_file` (array of 0..n absolute paths)
+- `absolute_trace_file` (array of 0..n absolute paths)
+- `absolute_metrics_file` (array of 0..n absolute paths)
 
 ## task_type Mapping (MUST follow exactly)
 
@@ -42,7 +42,8 @@ Required keys (all mandatory):
 ## Repository Selection Rules
 
 - Use scanned `repository_files` as the source of truth.
-- Select one or more log files, one or more trace files, and one or more metrics files.
+- Select all relevant available log, trace, and metric files for the incident date.
+- Use an empty array only when the repository contains no source for that telemetry family (for example, OpenRCA Telecom contains no logs).
 - Default to one file per category only when there is a single clear match.
 - Do not invent files when candidates exist in `repository_files`.
 - Prefer files under the selected `filename_date` directory.
