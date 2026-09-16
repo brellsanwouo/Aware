@@ -19,7 +19,7 @@ class SQLiteKnowledgeStore:
     @classmethod
     def from_url(cls, db_url: str) -> "SQLiteKnowledgeStore":
         if not db_url.startswith("sqlite:///"):
-            raise ValueError(f"Unsupported DB URL `{db_url}`. Only sqlite:///... is supported in V1.")
+            raise ValueError(f"Unsupported DB URL `{db_url}`. Only sqlite:///... is supported.")
         raw_path = db_url.removeprefix("sqlite:///")
         path = Path(raw_path).expanduser()
         if not path.is_absolute():
@@ -296,8 +296,7 @@ def resolve_db_url(explicit_db_url: str | None = None) -> str:
     env_url = os.getenv("ASSESS_DB_URL", "").strip()
     if env_url:
         return env_url
-    version = os.getenv("AWARE_RCA_VERSION", "v2").strip().lower()
-    filename = "assess_v3.db" if version == "v3" else "assess.db"
+    filename = "assess_v3.db"
     default_path = (Path.cwd() / "output" / filename).resolve()
     return f"sqlite:///{default_path}"
 

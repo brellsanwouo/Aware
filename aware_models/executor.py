@@ -90,6 +90,6 @@ class ExecutorRunResult(BaseModel):
     preliminary_causes: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0, default=0.0)
     coordinator_decision: CoordinatorDecision | None = None
-    execution_mode: Literal["v2", "v3"] = "v2"
+    execution_mode: Literal["v3"] = "v3"
     causal_graph: CausalGraph | None = None
     summary: str

@@ -29,7 +29,6 @@ Run every incident sequentially from an AWARE problems CSV:
 ```bash
 aware batch \
   --problems-csv /path/to/problems.csv \
-  --rca-version v3 \
   --max-agents 8 \
   --results-csv output/bank-v3-results.csv \
   --graph-dir output/bank-v3-graphs
@@ -45,9 +44,7 @@ The command writes:
 - one results CSV with component, reason, time, and overall scores;
 - one JSON and text artifact per incident;
 - a durable batch manifest and per-incident backend journals;
-- one causal-graph PNG per V3 incident when the graph is non-empty.
-
-`aware assess` and `aware execute` also accept `--rca-version v2|v3`.
+- one causal-graph PNG per incident when the graph is non-empty.
 
 ## Run the Full Assessment
 
@@ -67,7 +64,6 @@ aware assess \
 | `--query` | Parser / Assess | Natural-language incident request. |
 | `--buildspec-json` | Execute | Path to an existing BuildSpec JSON file. |
 | `--problems-csv` | Batch | AWARE problems catalogue to execute. |
-| `--rca-version` | Execute / Assess / Batch / UI | Select V2 or V3. |
 | `--results-csv` | Batch | Results and scoring CSV destination. |
 | `--graph-dir` | Batch | V3 causal graph PNG directory. |
 | `--db-url` | Execute / Assess / Batch | SQLite database URL override. |

@@ -433,7 +433,7 @@ class ExecutorAgent(Agent):
         knowledge_file: str | None = None,
         enable_reasoning: bool = True,
         enable_memory: bool = True,
-        execution_mode: str = "v2",
+        execution_mode: str = "v3",
     ) -> None:
         super().__init__(
             name="ExecutorAgent",
@@ -443,10 +443,10 @@ class ExecutorAgent(Agent):
         self.templates = templates or load_assess_templates()
         self.enable_reasoning = bool(enable_reasoning)
         self.enable_memory = bool(enable_memory)
-        self.execution_mode = "v3" if str(execution_mode).strip().lower() == "v3" else "v2"
+        self.execution_mode = "v3"
         self.knowledge_file = knowledge_file or os.getenv(
-            "AWARE_EXECUTOR_KB_FILE",
-            "knowledge/executor_rca_kb.md",
+            "AWARE_EXECUTOR_V3_KB_FILE",
+            "knowledge/executor_rca_v3_kb.md",
         )
 
     def execute_assess(
@@ -669,45 +669,9 @@ class ExecutorAgent(Agent):
                 ),
                 sender=instance_name,
             )
-            if (
-                self.enable_memory
-                and self.execution_mode == "v2"
-                and shared_memory_context
-            ):
-                self._emit(
-                    on_event,
-                    phase="read_shared_memory",
-                    recipient=instance_name,
-                    content=f"Loaded {len(shared_memory_context)} prior findings from shared memory.",
-                )
-            component_memory_context: list[str] = []
-            if (
-                self.enable_memory
-                and self.execution_mode == "v2"
-                and knowledge_store is not None
-                and component_focus
-            ):
-                component_memory_context = _format_component_memory_context(
-                    knowledge_store.search_component_memory(component=component_focus, limit=12),
-                    max_items=12,
-                )
-                if component_memory_context:
-                    self._emit(
-                        on_event,
-                        phase="read_component_memory",
-                        recipient=instance_name,
-                        content=(
-                            f"Loaded {len(component_memory_context)} memory item(s) for "
-                            f"component={component_focus}."
-                        ),
-                    )
             # V3 experts must form their first opinion from telemetry, not from
             # another expert's prose. Cross-agent opinions are reconciled later.
-            analysis_memory_context = (
-                []
-                if self.execution_mode == "v3"
-                else [*shared_memory_context, *component_memory_context]
-            )
+            analysis_memory_context: list[str] = []
             result = agent.analyze_need(
                 target_paths,
                 buildspec,
@@ -820,24 +784,6 @@ class ExecutorAgent(Agent):
                     ),
                     sender=instance_name,
                 )
-            if self.execution_mode == "v2" and origin == "seed" and (
-                _has_decisive_structured_metric(result.findings)
-                or _has_decisive_direct_log_failure(result.findings)
-            ):
-                skipped_seed_count = sum(
-                    1 for _, _, _, queued_origin in queue if queued_origin == "seed"
-                )
-                queue[:] = [item for item in queue if item[3] != "seed"]
-                if skipped_seed_count:
-                    self._emit(
-                        on_event,
-                        phase="early_convergence",
-                        recipient="Runtime",
-                        content=(
-                            "A unique structured anomaly resolved the incident; "
-                            f"skipped {skipped_seed_count} unnecessary seed domain agent(s)."
-                        ),
-                    )
             # Complete broad evidence coverage first. Then, at most once, focus the
             # best weakly-supported component in other domains. A candidate already
             # corroborated by two domains does not justify another agent.
@@ -846,7 +792,7 @@ class ExecutorAgent(Agent):
             should_checkpoint = not baseline_pending and not expansion_planned
             if should_checkpoint:
                 expansion_planned = True
-                if self.execution_mode == "v3" and not v3_experts_planned:
+                if not v3_experts_planned:
                     v3_experts_planned = True
                     metric_targets = [Path(item) for item in buildspec.absolute_metrics_file]
                     routed_specialties = ["jvm", "mysql", "redis"] if metric_targets else []
@@ -1152,11 +1098,7 @@ class ExecutorAgent(Agent):
                 preliminary_causes=preliminary_causes,
             )
 
-        causal_graph = (
-            build_causal_graph(findings, coordinator_decision)
-            if self.execution_mode == "v3"
-            else None
-        )
+        causal_graph = build_causal_graph(findings, coordinator_decision)
         return ExecutorRunResult(
             buildspec=buildspec,
             agents_instantiated=agents_instantiated,
@@ -2181,7 +2123,7 @@ def _derive_preliminary_causes(findings: list[AssessFinding]) -> list[str]:
 
 def _load_executor_knowledge(knowledge_file: str) -> tuple[str, str, list[str], list[str]]:
     """Load Executor knowledge text plus parsed known components/reasons."""
-    raw = (knowledge_file or "").strip() or "knowledge/executor_rca_kb.md"
+    raw = (knowledge_file or "").strip() or "knowledge/executor_rca_v3_kb.md"
     candidate = Path(raw)
     if not candidate.is_absolute():
         candidate = (Path.cwd() / candidate).resolve()

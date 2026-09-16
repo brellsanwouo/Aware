@@ -38,14 +38,13 @@ def test_exports_causal_graph_as_real_png(tmp_path: Path) -> None:
         assert image.width >= 2000
 
 
-def test_batch_command_is_exposed_with_version_and_graph_options() -> None:
+def test_batch_command_is_exposed_with_graph_options() -> None:
     runner = CliRunner()
 
     result = runner.invoke(cli_module.app, ["batch", "--help"])
 
     assert result.exit_code == 0
     assert "--problems-csv" in result.stdout
-    assert "--rca-version" in result.stdout
     assert "--results-csv" in result.stdout
     assert "--graph-dir" in result.stdout
 
@@ -112,7 +111,7 @@ def test_batch_command_runs_one_incident_and_writes_outputs(tmp_path, monkeypatc
     result = CliRunner().invoke(
         cli_module.app,
         [
-            "batch", "--problems-csv", str(problems), "--rca-version", "v3",
+            "batch", "--problems-csv", str(problems),
             "--batch-id", "batch-cli-test", "--limit", "1",
         ],
     )

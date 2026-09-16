@@ -110,7 +110,7 @@ def test_causal_graph_preserves_support_and_selected_outcome() -> None:
 
 
 def test_factory_selects_v3_strategy_and_knowledge(monkeypatch) -> None:
-    monkeypatch.setenv("AWARE_RCA_VERSION", "v3")
+    monkeypatch.delenv("AWARE_RCA_VERSION", raising=False)
     monkeypatch.delenv("AWARE_EXECUTOR_V3_KB_FILE", raising=False)
     agent_factory._EXECUTOR_AGENT = None
 

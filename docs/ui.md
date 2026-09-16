@@ -14,22 +14,7 @@ Open:
 http://127.0.0.1:8787
 ```
 
-### Compare V2 and V3 on separate ports
-
-Run the stable adaptive strategy and the experimental mixture-of-experts strategy
-in two terminals:
-
-```bash
-aware ui --rca-version v2 --host 127.0.0.1 --port 8787
-aware ui --rca-version v3 --host 127.0.0.1 --port 8788
-```
-
-Open `http://127.0.0.1:8787` for V2 and `http://127.0.0.1:8788` for V3. The
-active strategy appears in the runtime sidebar. V2 continues to use
-`output/assess.db`; V3 defaults to `output/assess_v3.db`, so experimental memory
-cannot influence the V2 baseline.
-
-V3 keeps the initial opinions independent, adds conservative JVM, MySQL, and
+The UI always runs the V3 strategy. V3 keeps the initial opinions independent, adds conservative JVM, MySQL, and
 Redis metric experts, reconciles their evidence after analysis, and emits an
 inspectable causal graph. The graph separates raw evidence, observed components,
 candidate hypotheses, contradictions, and the selected outcome.
@@ -42,7 +27,7 @@ candidate hypotheses, contradictions, and the selected outcome.
 | Telemetry directory | Path to the extracted telemetry case or repository. Selecting Nezha pre-fills the locally available example case. |
 | Incident question | Incident request sent to the Parser agent. Include the date and the start/end of the failure interval. |
 | Incident timezone | Timezone used to convert the interval to UNIX timestamps. Nezha uses `UTC`; the Bank benchmark historically uses `UTC+08:00`. |
-| Safety task budget | Optional stricter cap for ephemeral agents. Blank uses the controlled adaptive policy: up to three domain agents plus at most two justified follow-ups. |
+| Safety task budget | Optional stricter cap for ephemeral agents. Blank uses the controlled V3 policy: up to three domain agents, independent metric experts, plus at most two justified follow-ups. |
 | Memory database | Optional SQLite database URL. Leave blank to use the configured default. |
 
 ## Runtime Panels
@@ -51,7 +36,7 @@ candidate hypotheses, contradictions, and the selected outcome.
 - **Root cause synthesis** surfaces the component, reason, occurrence time, and confidence first.
 - **Live analysis** shows streamed events and the latest state of each agent.
 - **Findings** presents evidence and anomalies as readable cards.
-- **Causal graph** visualizes evidence-to-hypothesis support and contradictions in V3. `Download PNG` exports the currently selected single-run or batch-incident graph at 2× resolution with a white background.
+- **Causal graph** visualizes evidence-to-hypothesis support and contradictions. `Download PNG` exports the currently selected single-run or batch-incident graph at 2× resolution with a white background.
 - **Technical data** keeps the BuildSpec, scope, synthesis, and final JSON available for inspection.
 - Run metrics show elapsed time, event count, finding count, the exact number of ephemeral agents created, and execution state.
 
@@ -78,7 +63,7 @@ The UI supports both `Single problem` and `CSV batch` run modes. To assess the c
 
 Downloading and uploading a problems CSV is optional. The download link exports the same automatically generated catalogue, while the file field can deliberately replace it with a custom AWARE catalogue.
 
-Problems run sequentially. As soon as the CSV is loaded, the full queue is visible with a `PENDING` status. During execution, exactly one row changes to `RUNNING`; completed rows become `PASS` or `FAIL`. The `Agents` column reports how many ephemeral agents were created for each incident. In V3, the `Graph` column opens the causal graph for that row. The graph view also provides an incident selector, so completing a later assessment does not remove access to earlier graphs in the same batch. The browser also shows progress, overall success rate, and separate component, reason, and time rates. `Export results CSV` downloads the detailed predictions, agent counts, scores, run IDs, and log links after at least one problem completes.
+Problems run sequentially. As soon as the CSV is loaded, the full queue is visible with a `PENDING` status. During execution, exactly one row changes to `RUNNING`; completed rows become `PASS` or `FAIL`. The `Agents` column reports how many ephemeral agents were created for each incident. The `Graph` column opens the causal graph for that row. The graph view also provides an incident selector, so completing a later assessment does not remove access to earlier graphs in the same batch. The browser also shows progress, overall success rate, and separate component, reason, and time rates. `Export results CSV` downloads the detailed predictions, agent counts, scores, run IDs, and log links after at least one problem completes.
 
 Every browser batch receives a unique batch ID. The backend persists a batch manifest and complete per-incident journals even if the browser connection closes:
 

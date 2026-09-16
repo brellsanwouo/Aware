@@ -29,7 +29,7 @@ class _DecisionStubLLM:
 def _reset_executor_singleton_and_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWARE_ENABLE_REASONING", "true")
     monkeypatch.setenv("AWARE_ENABLE_MEMORY", "true")
-    monkeypatch.setenv("AWARE_RCA_VERSION", "v2")
+    monkeypatch.delenv("AWARE_RCA_VERSION", raising=False)
     agent_factory_module._EXECUTOR_AGENT = None
 
 
@@ -244,7 +244,14 @@ def test_executor_without_budget_covers_every_discovered_target(tmp_path) -> Non
             values = [item.target_path]
         analyzed_paths.update(Path(value).resolve() for value in values)
     assert expected_metric_paths <= analyzed_paths
-    assert len(result.agents_instantiated) == 3
+    assert result.agents_instantiated == [
+        "MetricsAgent",
+        "LogsAgent",
+        "TraceAgent",
+        "JVMExpert",
+        "MySQLExpert",
+        "RedisExpert",
+    ]
     assert "cap_reached" not in events
     assert "converged" in events
     assert events.count("terminate_agent") == len(result.agents_instantiated)
@@ -286,7 +293,14 @@ def test_executor_skips_expansion_for_cross_domain_component_support(tmp_path) -
         max_agents=10,
         on_event=lambda event: events.append(event.phase),
     )
-    assert len(result.agents_instantiated) == 3
+    assert result.agents_instantiated == [
+        "MetricsAgent",
+        "LogsAgent",
+        "TraceAgent",
+        "JVMExpert",
+        "MySQLExpert",
+        "RedisExpert",
+    ]
     assert "expansion_skipped" in events
 
 
@@ -314,8 +328,15 @@ def test_executor_limits_weak_component_followups_to_two(tmp_path) -> None:
         on_event=lambda event: events.append(event.phase),
     )
 
-    assert len(result.agents_instantiated) == 5
-    assert result.agents_instantiated[:3] == ["MetricsAgent", "LogsAgent", "TraceAgent"]
+    assert len(result.agents_instantiated) == 8
+    assert result.agents_instantiated[:6] == [
+        "MetricsAgent",
+        "LogsAgent",
+        "TraceAgent",
+        "JVMExpert",
+        "MySQLExpert",
+        "RedisExpert",
+    ]
     assert events.count("expand_enqueue") == 1
     assert sum("component_focus=Tomcat02" in item.detail for item in result.task_results) == 2
 
@@ -340,7 +361,7 @@ def test_executor_expansion_budget_can_be_reduced_to_one(tmp_path, monkeypatch) 
 
     result = agent.execute_assess(buildspec=buildspec, repository_path=str(tmp_path))
 
-    assert len(result.agents_instantiated) == 4
+    assert len(result.agents_instantiated) == 7
 
 
 def test_executor_honors_requested_followups_for_a_named_component(tmp_path) -> None:
@@ -375,6 +396,9 @@ def test_executor_honors_requested_followups_for_a_named_component(tmp_path) -> 
         "MetricsAgent",
         "LogsAgent",
         "TraceAgent",
+        "JVMExpert",
+        "MySQLExpert",
+        "RedisExpert",
         "LogsAgent_2",
         "TraceAgent_2",
     ]
@@ -407,8 +431,15 @@ def test_executor_verifies_a_medium_named_component_without_explicit_request(tmp
 
     result = agent.execute_assess(buildspec=buildspec, repository_path=str(tmp_path))
 
-    assert len(result.agents_instantiated) == 5
-    assert result.agents_instantiated[:3] == ["MetricsAgent", "LogsAgent", "TraceAgent"]
+    assert len(result.agents_instantiated) == 8
+    assert result.agents_instantiated[:6] == [
+        "MetricsAgent",
+        "LogsAgent",
+        "TraceAgent",
+        "JVMExpert",
+        "MySQLExpert",
+        "RedisExpert",
+    ]
 
 
 def test_coordinator_keeps_reason_as_a_concise_explicit_label(tmp_path) -> None:
@@ -733,8 +764,11 @@ def test_executor_uses_llm_even_when_reasoning_disabled(tmp_path) -> None:
         repository_path=str(tmp_path),
     )
     assert result.task_results
-    assert llm.call_count >= len(result.task_results)
-    assert all("decision_source=llm" in item.detail for item in result.task_results)
+    llm_backed_results = [
+        item for item in result.task_results if not item.agent_name.endswith("Expert")
+    ]
+    assert llm.call_count >= len(llm_backed_results)
+    assert all("decision_source=llm" in item.detail for item in llm_backed_results)
 
 
 def test_executor_preserves_novel_telemetry_backed_causes(tmp_path) -> None:

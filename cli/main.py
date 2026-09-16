@@ -38,12 +38,9 @@ def _runtime_flags() -> tuple[bool, bool]:
     )
 
 
-def _set_rca_version(value: str | None) -> str:
-    resolved = (value or os.getenv("AWARE_RCA_VERSION", "v2")).strip().lower()
-    if resolved not in {"v2", "v3"}:
-        raise typer.BadParameter("RCA version must be v2 or v3.")
-    os.environ["AWARE_RCA_VERSION"] = resolved
-    return resolved
+def _set_v3_runtime() -> str:
+    os.environ["AWARE_RCA_VERSION"] = "v3"
+    return "v3"
 
 
 def _print_explicit_assess_sections(assessment_output: dict[str, object]) -> None:
@@ -239,9 +236,6 @@ def execute_assess(
     max_agents: Annotated[
         int | None, typer.Option("--max-agents", help="Maximum number of sub-agents to instantiate.")
     ] = None,
-    rca_version: Annotated[
-        str | None, typer.Option("--rca-version", help="RCA engine version: v2 or v3.")
-    ] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Print JSON only.")] = False,
 ) -> None:
     """Execute Assess stage from an existing BuildSpec."""
@@ -251,7 +245,7 @@ def execute_assess(
     if not repo.exists():
         typer.secho(f"Repository path does not exist: {repo}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-    resolved_version = _set_rca_version(rca_version)
+    resolved_version = _set_v3_runtime()
 
     run_id = f"run-{uuid.uuid4().hex[:10]}"
     event_history: list[dict[str, object]] = []
@@ -262,7 +256,7 @@ def execute_assess(
         if os.getenv("EXECUTOR_MAX_AGENTS", "5").strip().isdigit()
         else 5
     )
-    resolved_max_agents = int(max_agents) if max_agents is not None else max(default_max_agents, 8) if resolved_version == "v3" else default_max_agents
+    resolved_max_agents = int(max_agents) if max_agents is not None else max(default_max_agents, 8)
     enable_reasoning, enable_memory = _runtime_flags()
     resolved_db_url = resolve_db_url(db_url)
     knowledge_store = maybe_create_knowledge_store(resolved_db_url) if enable_memory else None
@@ -412,16 +406,13 @@ def assess_end_to_end(
     llm_model: Annotated[
         str | None, typer.Option("--llm-model", help="OpenAI model override.")
     ] = None,
-    rca_version: Annotated[
-        str | None, typer.Option("--rca-version", help="RCA engine version: v2 or v3.")
-    ] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Print JSON only.")] = False,
 ) -> None:
     """Run ParserAgent then ExecutorAgent in one command."""
     if not repo.exists():
         typer.secho(f"Repository path does not exist: {repo}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-    resolved_version = _set_rca_version(rca_version)
+    resolved_version = _set_v3_runtime()
 
     run_id = f"run-{uuid.uuid4().hex[:10]}"
     event_history: list[dict[str, object]] = []
@@ -431,7 +422,7 @@ def assess_end_to_end(
         if os.getenv("EXECUTOR_MAX_AGENTS", "5").strip().isdigit()
         else 5
     )
-    resolved_max_agents = int(max_agents) if max_agents is not None else max(default_max_agents, 8) if resolved_version == "v3" else default_max_agents
+    resolved_max_agents = int(max_agents) if max_agents is not None else max(default_max_agents, 8)
     enable_reasoning, enable_memory = _runtime_flags()
     resolved_db_url = resolve_db_url(db_url)
     knowledge_store = maybe_create_knowledge_store(resolved_db_url) if enable_memory else None
@@ -581,9 +572,6 @@ def assess_batch(
         Path | None,
         typer.Option("--repo", help="Fallback telemetry repository when source_path is blank."),
     ] = None,
-    rca_version: Annotated[
-        str | None, typer.Option("--rca-version", help="RCA engine version: v2 or v3.")
-    ] = None,
     results_csv: Annotated[
         Path | None, typer.Option("--results-csv", help="Batch score CSV destination.")
     ] = None,
@@ -619,7 +607,7 @@ def assess_batch(
     if repo is not None and not repo.exists():
         typer.secho(f"Fallback repository does not exist: {repo}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-    version = _set_rca_version(rca_version)
+    version = _set_v3_runtime()
     resolved_batch_id = validate_batch_identifier(
         batch_id or f"batch-cli-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}",
         "batch_id",
@@ -635,7 +623,7 @@ def assess_batch(
     resolved_results_csv = (results_csv or (batch_root / "results.csv")).expanduser().resolve()
     resolved_graph_dir = (graph_dir or (batch_root / "graphs")).expanduser().resolve()
     default_agents = int(os.getenv("EXECUTOR_MAX_AGENTS", "5")) if os.getenv("EXECUTOR_MAX_AGENTS", "5").isdigit() else 5
-    resolved_max_agents = int(max_agents) if max_agents is not None else max(default_agents, 8) if version == "v3" else default_agents
+    resolved_max_agents = int(max_agents) if max_agents is not None else max(default_agents, 8)
     resolved_attempts = int(max_attempts if max_attempts is not None else os.getenv("PARSER_MAX_ATTEMPTS", "5"))
     resolved_model = llm_model or os.getenv("OPENAI_MODEL")
     resolved_db_url = resolve_db_url(db_url)
@@ -745,11 +733,7 @@ def assess_batch(
                 error_message=None,
             )
             combined_payload["artifacts"] = artifacts
-            if (
-                version == "v3"
-                and executor_result.causal_graph is not None
-                and executor_result.causal_graph.nodes
-            ):
+            if executor_result.causal_graph is not None and executor_result.causal_graph.nodes:
                 graph_path = str(
                     export_causal_graph_png(
                         executor_result.causal_graph,
@@ -828,7 +812,7 @@ def assess_batch(
         "passed": passed,
         "success_rate": round(passed / len(results), 4) if results else 0.0,
         "results_csv": str(resolved_results_csv),
-        "graph_dir": str(resolved_graph_dir) if version == "v3" else "",
+        "graph_dir": str(resolved_graph_dir),
         "batch_manifest": str(batch_root / "manifest.json"),
     }
     if json_output:
@@ -844,10 +828,6 @@ def assess_batch(
 def launch_ui(
     host: Annotated[str | None, typer.Option("--host", help="UI host.")] = None,
     port: Annotated[int | None, typer.Option("--port", help="UI port.")] = None,
-    rca_version: Annotated[
-        str | None,
-        typer.Option("--rca-version", help="RCA engine version: v2 or v3."),
-    ] = None,
 ) -> None:
     """Launch web UI for live parser conversation."""
     try:
@@ -860,11 +840,7 @@ def launch_ui(
 
     resolved_host = (host or os.getenv("UI_HOST", "127.0.0.1")).strip()
     resolved_port = int(port if port is not None else os.getenv("UI_PORT", "8787"))
-    resolved_version = (rca_version or os.getenv("AWARE_RCA_VERSION", "v2")).strip().lower()
-    if resolved_version not in {"v2", "v3"}:
-        typer.secho("--rca-version must be v2 or v3.", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-    os.environ["AWARE_RCA_VERSION"] = resolved_version
+    resolved_version = _set_v3_runtime()
 
     typer.secho(
         f"Starting AWARE {resolved_version.upper()} UI on http://{resolved_host}:{resolved_port}",

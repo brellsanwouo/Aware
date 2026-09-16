@@ -42,7 +42,7 @@ agents/executor_agent.py
 Executor knowledge is loaded from:
 
 ```text
-knowledge/executor_rca_kb.md
+knowledge/executor_rca_v3_kb.md
 ```
 
 ## Dynamic Agent Templates

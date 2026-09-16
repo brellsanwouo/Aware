@@ -35,8 +35,8 @@ from runtime.reporting import build_assessment_output
 def create_app() -> FastAPI:
     """Create UI app."""
     loaded_env_files = [str(path) for path in load_env()]
-    rca_version = os.getenv("AWARE_RCA_VERSION", "v2").strip().lower()
-    rca_version = "v3" if rca_version == "v3" else "v2"
+    os.environ["AWARE_RCA_VERSION"] = "v3"
+    rca_version = "v3"
     app = FastAPI(title=f"AWARE Assess UI ({rca_version.upper()})")
 
     @app.get("/", response_class=HTMLResponse)
@@ -300,7 +300,7 @@ def create_app() -> FastAPI:
             default_max_agents = (
                 int(configured_agent_budget) if configured_agent_budget.isdigit() else None
             )
-            if rca_version == "v3" and max_agents is None:
+            if max_agents is None:
                 default_max_agents = max(default_max_agents or 0, 8)
             resolved_max_agents = int(max_agents) if max_agents is not None else default_max_agents
             try:

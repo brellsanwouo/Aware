@@ -1,4 +1,4 @@
-# AWARE Assess ADK MVP
+# AWARE V3 Assess ADK MVP
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat&logo=python&logoColor=white)
 ![Google ADK](https://img.shields.io/badge/Google%20ADK-enabled-4285F4?style=flat&logo=google&logoColor=white)
@@ -9,7 +9,7 @@
 ![SQLite](https://img.shields.io/badge/SQLite-supported-003B57?style=flat&logo=sqlite&logoColor=white)
 ![Pytest](https://img.shields.io/badge/Pytest-ready-0A9EDC?style=flat&logo=pytest&logoColor=white)
 
-Minimal **Assess** prototype for AWARE (Parser + Executor), with explicit separation:
+V3-only **Assess** prototype for AWARE (Parser + Executor), with explicit separation:
 
 - `tools/` for file/data handling
 - `templates/` for agent templates to instantiate
@@ -53,8 +53,7 @@ Parser + Executor in a single command:
 ```bash
 aware assess \
   --query "On 2021-03-04 between 18:30:00 and 19:00:00 checkout timeout" \
-  --repo /path/to/repository \
-  --rca-version v3
+  --repo /path/to/repository
 ```
 
 Run a complete CSV batch with per-incident PNG causal graphs:
@@ -62,7 +61,6 @@ Run a complete CSV batch with per-incident PNG causal graphs:
 ```bash
 aware batch \
   --problems-csv /path/to/problems.csv \
-  --rca-version v3 \
   --results-csv output/results.csv \
   --graph-dir output/graphs
 ```
@@ -73,14 +71,6 @@ Start the UI:
 
 ```bash
 aware ui --host 127.0.0.1 --port 8787
-```
-
-To compare the stable V2 with the experimental V3 mixture of independent
-experts and its causal graph, start them on separate ports:
-
-```bash
-aware ui --rca-version v2 --host 127.0.0.1 --port 8787
-aware ui --rca-version v3 --host 127.0.0.1 --port 8788
 ```
 
 Then open:
@@ -160,7 +150,7 @@ Executor sub-agent information is stored in a SQLite database:
 - table `findings`
 
 Default DB:
-- `sqlite:///output/assess.db`
+- `sqlite:///output/assess_v3.db`
 
 You can override it with:
 - UI: `DB URL` field
@@ -177,10 +167,9 @@ Useful `.env` variables:
 - `OPENAI_MODEL` (optional, default: `gpt-5-mini`)
 - `PARSER_MAX_ATTEMPTS`
 - `AWARE_PARSER_KB_FILE` (optional, default: `knowledge/parser_buildspec_kb.md`)
-- `AWARE_EXECUTOR_KB_FILE` (optional, default: `knowledge/executor_rca_kb.md`)
+- `AWARE_EXECUTOR_V3_KB_FILE` (optional, default: `knowledge/executor_rca_v3_kb.md`)
 - `EXECUTOR_MAX_AGENTS` (optional: global limit for instantiated sub-agents)
 - `EXECUTOR_MAX_EXPANSIONS` (optional: focused follow-ups after initial domain coverage; default `2`, maximum `4`)
-  - recommended V1 default: `5`
 - `AWARE_ENABLE_REASONING` (`true|false`, default `true`)
   - `false`: the LLM is still used, but in fast reasoning mode (more direct prompts)
 - `AWARE_ENABLE_MEMORY` (`true|false`, default `true`)
@@ -206,9 +195,9 @@ This file contains:
 - normalization rules
 - file selection rules (log/trace/metrics)
 
-`ExecutorAgent` also loads its knowledge base:
+`ExecutorAgent` loads its V3 knowledge base:
 
-- `knowledge/executor_rca_kb.md`
+- `knowledge/executor_rca_v3_kb.md`
 
 This file contains:
 - possible components/reasons

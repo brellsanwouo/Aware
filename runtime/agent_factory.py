@@ -51,12 +51,9 @@ def get_executor_agent(llm_client: LLMClient | None = None) -> ExecutorAgent:
     global _EXECUTOR_AGENT
     enable_reasoning = env_bool("AWARE_ENABLE_REASONING", True)
     enable_memory = env_bool("AWARE_ENABLE_MEMORY", True)
-    execution_mode = os.getenv("AWARE_RCA_VERSION", "v2").strip().lower()
-    kb_file = (
-        os.getenv("AWARE_EXECUTOR_V3_KB_FILE", "knowledge/executor_rca_v3_kb.md")
-        if execution_mode == "v3"
-        else os.getenv("AWARE_EXECUTOR_KB_FILE", "knowledge/executor_rca_kb.md")
-    )
+    os.environ["AWARE_RCA_VERSION"] = "v3"
+    execution_mode = "v3"
+    kb_file = os.getenv("AWARE_EXECUTOR_V3_KB_FILE", "knowledge/executor_rca_v3_kb.md")
     if _EXECUTOR_AGENT is None:
         _EXECUTOR_AGENT = ExecutorAgent(
             llm_client=llm_client,
@@ -70,7 +67,7 @@ def get_executor_agent(llm_client: LLMClient | None = None) -> ExecutorAgent:
         _EXECUTOR_AGENT.knowledge_file = kb_file
         _EXECUTOR_AGENT.enable_reasoning = enable_reasoning
         _EXECUTOR_AGENT.enable_memory = enable_memory
-        _EXECUTOR_AGENT.execution_mode = "v3" if execution_mode == "v3" else "v2"
+        _EXECUTOR_AGENT.execution_mode = "v3"
     agent = _EXECUTOR_AGENT
     if not isinstance(agent, BaseAgent):
         raise TypeError("ExecutorAgent must inherit from google.adk.agents.BaseAgent.")
