@@ -32,11 +32,14 @@ CLI IDs use `batch-cli-YYYYMMDDTHHMMSSZ-xxxxxx`; UI IDs use the same UTC
 timestamp format with the `batch-ui-` prefix. `T` separates date and time,
 and `Z` indicates UTC. Existing batch directories keep their original names.
 
-The `results.csv` file includes the path to each incident's memory database. The
-CLI PNG and UI graph identify the selected component, cause, occurrence time
-in the incident's configured timezone, and confidence. Observations without a displayed graph relation are
-grouped in a separate **Other findings** area beneath the causal chain.
-Explicit output path overrides may place selected files outside this directory.
+The `results.csv` file records each incident's predicted and expected cause,
+component/reason/time checks, overall score, agent count, and artifact paths.
+It includes the memory database path when memory is enabled. The CLI PNG and
+UI graph identify the selected component, cause, occurrence time in the
+incident's configured timezone, and confidence. Observations without a
+displayed graph relation appear in a separate **Other findings** area beneath
+the causal chain. Explicit output path overrides may place selected files
+outside this directory.
 
 ## Assessment Sections
 
@@ -55,14 +58,16 @@ The final assessment output can include:
 
 When memory is enabled, Aware writes runtime information to SQLite.
 
-Default URL for a standalone run:
+Default file path for a standalone run:
 
 ```text
-sqlite:///output/memory/run-YYYYMMDDTHHMMSSZ-xxxxxxxx.db
+output/memory/run-YYYYMMDDTHHMMSSZ-xxxxxxxx.db
 ```
 
-For either CLI or browser batches, the default is
-`sqlite:///output/batches/<batch-id>/memory/<run-id>.db`.
+For either CLI or browser batches, the default file path is
+`output/batches/<batch-id>/memory/<run-id>.db`. AWARE logs the resolved
+absolute SQLite URL for the run.
+No memory database is created when `AWARE_ENABLE_MEMORY=false`.
 
 Tables:
 
@@ -70,5 +75,6 @@ Tables:
 - `events`
 - `task_results`
 - `findings`
+- `component_memory`
 
 This database is useful for later inspection, debugging, and comparing assessment runs.

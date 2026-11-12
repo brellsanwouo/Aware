@@ -3,6 +3,7 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat&logo=python&logoColor=white)
 ![Google ADK](https://img.shields.io/badge/Google%20ADK-enabled-4285F4?style=flat&logo=google&logoColor=white)
 ![OpenAI](https://img.shields.io/badge/OpenAI-enabled-412991?style=flat&logo=openai&logoColor=white)
+![Ollama Cloud](https://img.shields.io/badge/Ollama%20Cloud-enabled-111827?style=flat)
 ![FastAPI](https://img.shields.io/badge/FastAPI-supported-009688?style=flat&logo=fastapi&logoColor=white)
 ![Pydantic](https://img.shields.io/badge/Pydantic-2.x-E92063?style=flat&logo=pydantic&logoColor=white)
 ![Typer](https://img.shields.io/badge/Typer-CLI-111827?style=flat)
@@ -29,15 +30,44 @@ Create your local `.env`:
 
 ```bash
 cp .env.example .env
-# or use the existing .env and fill in OPENAI_API_KEY
 ```
 
-## Run
+Choose `AWARE_LLM_PROVIDER=openai-compatible` with `OPENAI_API_KEY` and
+`OPENAI_MODEL`, or `AWARE_LLM_PROVIDER=ollama` with `OLLAMA_API_KEY` and
+`OLLAMA_MODEL` for Ollama Cloud. Keep keys in `.env` or the shell.
+The raw datasets are ignored by Git and must be extracted before analysis.
+
+## Run a Dataset Batch
+
+The same CLI command structure runs Nezha and OpenRCA. AWARE prepares the
+incident questions from the dataset catalogue; no manual `--query` is needed:
+
+```bash
+aware batch --dataset nezha --source /path/to/extracted/Nezha --limit 5
+aware batch --dataset openrca_bank --source /path/to/extracted/Bank-003 --limit 5
+aware batch --dataset openrca_market --source /path/to/extracted/Market-002 --limit 5
+aware batch --dataset openrca_telecom --source /path/to/extracted/Telecom-001 --limit 5
+```
+
+`--source` can also point to a telemetry folder inside the extracted dataset.
+Add `--max-agents 5` to set the agent ceiling per incident, `--max-attempts 5`
+to set the Parser retry limit, or `--llm-model MODEL` to override the selected
+provider's model. The provider, reasoning, and memory settings come from `.env`.
+
+The CLI prints the active provider, model, reasoning, memory, incident count,
+and agent ceiling at startup. Each batch keeps its catalogue, configuration,
+results, journals, reports, graphs, and optional per-incident SQLite memory
+under a UTC timestamped `output/batches/batch-cli-<timestamp>-<suffix>/` folder.
+The UI uses the same timestamp format with a `batch-ui-` prefix.
+
+See [Usage](docs/usage.md) for all batch parameters and CSV inputs.
+
+## Other CLI Commands
 
 ```bash
 aware parse \
   --query "On 2021-03-04 between 18:30:00 and 19:00:00 checkout timeout" \
-  --repo /agentfactory/data/Bank/telemetry/2021_03_04
+  --repo /path/to/telemetry
 ```
 
 Run the Executor step from an existing BuildSpec:
@@ -56,31 +86,15 @@ aware assess \
   --repo /path/to/repository
 ```
 
-Run five incidents directly from an extracted dataset, without writing a query or a problems CSV:
-
-```bash
-aware batch --dataset nezha --source data/Nezha/Nezha-v0.1 --limit 5
-aware batch --dataset openrca_bank --source data/Openrca/Bank-003 --limit 5
-```
-
-The same command accepts `openrca_market` and `openrca_telecom` with their
-extracted dataset directories. `--source` may also point to a telemetry folder
-inside the selected dataset.
-
-The CLI prints the active provider, model, reasoning and memory settings at
-startup. Each batch keeps its catalogue, configuration, results, journals,
-reports, graphs, and per-incident SQLite memory under `output/batches/<batch-id>/`.
-
-Run an existing CSV batch with per-incident PNG causal graphs:
+Run an existing CSV batch with the same per-batch output layout:
 
 ```bash
 aware batch \
   --problems-csv /path/to/problems.csv \
-  --results-csv output/results.csv \
-  --graph-dir output/graphs
+  --limit 5
 ```
 
-## UI Conversation Live
+## Web UI
 
 Start the UI:
 
@@ -94,17 +108,10 @@ Then open:
 http://127.0.0.1:8787
 ```
 
-In the UI:
-- enter the user query
-- enter the repository path
-- start `Run Assess` (Parser + Executor)
-- watch the live conversation:
-  - parser initialization
-  - reasoning / LLM attempt
-  - validation
-  - correction if invalid
-  - Executor run (LogsAgent / TraceAgent / MetricsAgent)
-  - final success + full JSON output
+In the UI, select a dataset, `Dataset batch`, and an extracted dataset or
+telemetry directory, then click `Analyze batch`. Use `Single problem` and
+`Analyze incident` for a manually entered question. The dashboard shows live
+agent activity, results, and causal graphs. See [Web UI](docs/ui.md).
 
 ## Architecture Runtime
 
@@ -163,10 +170,13 @@ Executor sub-agent information is stored in a SQLite database:
 - table `events`
 - table `task_results`
 - table `findings`
+- table `component_memory`
 
-Default DB:
-- `sqlite:///output/memory/run-YYYYMMDDTHHMMSSZ-xxxxxxxx.db` for standalone runs
-- `sqlite:///output/batches/<batch-id>/memory/<run-id>.db` for CLI and UI batches
+Default database files:
+- `output/memory/run-YYYYMMDDTHHMMSSZ-xxxxxxxx.db` for standalone runs
+- `output/batches/<batch-id>/memory/<run-id>.db` for CLI and UI batches
+
+AWARE reports each resolved absolute SQLite URL at runtime.
 
 You can override it with:
 - UI: `db_url` request parameter for API callers

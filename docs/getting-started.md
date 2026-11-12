@@ -3,48 +3,68 @@
 ## Requirements
 
 - Python 3.11 or newer
-- An OpenAI-compatible API key
-- A telemetry repository containing logs, traces, and metrics to analyze
+- An OpenAI-compatible API endpoint and key, or an Ollama Cloud account and API key
+- An **extracted** Nezha or OpenRCA dataset with its incident labels and telemetry
+
+The raw datasets are excluded from Git. Download and extract the dataset you want
+to analyze before running a batch. A ZIP file alone is not a valid `--source` for
+execution.
 
 ## Install
 
-Create and activate a virtual environment:
+Create a virtual environment and install AWARE:
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
+pip install -e .
 ```
 
-Install the project in editable mode with development dependencies:
+Install the test and documentation dependencies only when needed:
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,docs]"
 ```
 
-## Configure Environment
+## Choose an LLM provider
 
-Create a local `.env` file:
+Copy the configuration template:
 
 ```bash
 cp .env.example .env
 ```
 
-Then set at least:
+For an OpenAI-compatible API, set `AWARE_LLM_PROVIDER=openai-compatible`,
+`OPENAI_API_KEY`, and `OPENAI_MODEL`. For Ollama Cloud, set
+`AWARE_LLM_PROVIDER=ollama`, `OLLAMA_API_KEY`, and `OLLAMA_MODEL`. The `ollama`
+provider name selects **Ollama Cloud**. See [Configuration](configuration.md)
+for the endpoint and runtime settings. Keep actual keys in `.env` or your shell;
+`.env` is ignored by Git.
+
+## Run a dataset batch
+
+Analyze the first five incidents from an extracted Nezha dataset:
 
 ```bash
-OPENAI_API_KEY=your_api_key
+aware batch --dataset nezha --source /path/to/extracted/Nezha --limit 5
 ```
 
-Optional values can be added later for model selection, database storage, parser attempts, and runtime toggles. See [Configuration](configuration.md).
-
-## First Run
-
-Run the full parser + executor flow:
+OpenRCA uses the same command structure. For example:
 
 ```bash
-aware assess \
-  --query "On 2021-03-04 between 18:30:00 and 19:00:00 checkout timeout" \
-  --repo /path/to/repository
+aware batch --dataset openrca_bank --source /path/to/extracted/Bank-003 --limit 5
 ```
 
-The command produces a validated BuildSpec, launches executor sub-agents, and saves run artifacts under `output/`.
+Use `openrca_market` or `openrca_telecom` for the other OpenRCA datasets.
+`--source` may also point to a telemetry folder inside an extracted dataset.
+AWARE prepares the incident requests from the catalogue, so a batch does not
+need `--query` or a manually prepared CSV. `--max-agents 5` can override the
+per-incident agent ceiling from `.env`.
+
+At startup, the CLI reports the provider, model, reasoning and memory settings,
+incident count, and agent limit. It writes a timestamped directory under
+`output/batches/` containing the selected catalogue, scores, reports, graphs,
+journals, and one SQLite memory file per incident when memory is enabled.
+
+For the browser interface, run `aware ui --host 127.0.0.1 --port 8787` and
+open `http://127.0.0.1:8787`. See [Web UI](ui.md) for its batch workflow.

@@ -23,9 +23,10 @@ candidate hypotheses, contradictions, and the selected outcome.
 
 | Field | Description |
 | --- | --- |
+| Run mode | `Dataset batch` prepares and runs catalogue incidents; `Single problem` runs one manually entered incident question. |
 | Dataset | Select `Nezha`, `OpenRCA · Bank`, `OpenRCA · Market`, or `OpenRCA · Telecom` to activate the corresponding paths, timezone, catalogue, and telemetry layout. |
 | Telemetry directory | Path to the extracted dataset or one of its telemetry folders. For a batch, the backend finds the incident labels higher in that dataset and uses the right source directory for each incident. |
-| Incident question | Incident request sent to the Parser agent. Include the date and the start/end of the failure interval. |
+| Incident question | Required only in `Single problem` mode. Include the date and start/end of the failure interval. Dataset batches generate this question from the catalogue. |
 
 The incident timezone is selected automatically from the dataset profile
 (Nezha uses UTC; OpenRCA and Generic default to UTC+08:00). The UI displays
@@ -89,7 +90,7 @@ output/batches/<batch_id>/
 └── memory/<run_id>.db
 ```
 
-The graph file is written when a causal graph exists, and the SQLite file when memory is enabled. An explicit database URL can place memory outside the batch directory. The JSON journal contains the run ID, status, exact agent count, every emitted runtime event, artifact paths, error details, the causal graph when produced, and the complete result payload. The batch table exposes `JSON` and `TXT` links per incident, while `Backend batch log` opens the manifest for the whole batch.
+The graph file is written when a causal graph exists, and the SQLite file when memory is enabled. An explicit database URL supplied by an API caller can place memory outside the batch directory; the browser uses the per-run default. The JSON journal contains the run ID, status, exact agent count, every emitted runtime event, artifact paths, error details, the causal graph when produced, and the complete result payload. The batch table exposes `JSON` and `TXT` links per incident, while `Backend batch log` opens the manifest for the whole batch.
 
 Each prepared incident contains:
 
@@ -122,7 +123,7 @@ The three OpenRCA datasets use local datetimes in `UTC+08:00`. Their `record.csv
 
 Select the desired OpenRCA dataset, `Dataset batch`, and its telemetry directory. The backend prepares the catalogue automatically and populates the incident queue. Each catalogue contains one simple full-RCA incident per ground-truth record:
 
-The CLI uses the same dataset preparation with `aware batch --dataset openrca_bank --source /path/to/extracted/Bank-003 --limit 5` (or `openrca_market` / `openrca_telecom`).
+The CLI uses the same dataset preparation with `aware batch --dataset openrca_bank --source /path/to/extracted/Bank-003 --limit 5` (or `openrca_market` / `openrca_telecom`). The `--source` directory must be extracted before analysis.
 
 | Dataset | Problems | Systems |
 | --- | ---: | --- |
