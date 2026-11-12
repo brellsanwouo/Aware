@@ -651,7 +651,7 @@ def assess_batch(
         problems = _read_problems_csv(problems_csv)
     version = _set_v3_runtime()
     resolved_batch_id = validate_batch_identifier(
-        batch_id or f"batch-cli-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}",
+        batch_id or f"batch-cli-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:6]}",
         "batch_id",
     )
     if limit is not None:

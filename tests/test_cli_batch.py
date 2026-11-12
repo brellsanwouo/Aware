@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -237,13 +238,20 @@ def test_batch_command_prepares_openrca_dataset_directly(tmp_path, monkeypatch, 
         root / "cloudbed-1" / "telemetry" / "2021_03_04"
         if variant == "market" else root / "telemetry" / "2021_03_04"
     )
+    id_args = [] if variant == "bank" else ["--batch-id", f"batch-{variant}"]
     result = CliRunner().invoke(cli_module.app, [
         "batch", "--dataset", dataset, "--source", str(selected_source),
-        "--limit", "1", "--batch-id", f"batch-{variant}",
+        "--limit", "1", *id_args,
     ])
 
     assert result.exit_code == 0, result.stdout
-    batch_root = tmp_path / "output" / "batches" / f"batch-{variant}"
+    batch_dirs = list((tmp_path / "output" / "batches").iterdir())
+    assert len(batch_dirs) == 1
+    batch_root = batch_dirs[0]
+    if variant == "bank":
+        assert re.fullmatch(r"batch-cli-\d{8}T\d{6}Z-[0-9a-f]{6}", batch_root.name)
+    else:
+        assert batch_root.name == f"batch-{variant}"
     config = json.loads((batch_root / "config.json").read_text(encoding="utf-8"))
     assert config["dataset"] == dataset
     assert config["source_path"] == str(selected_source.resolve())

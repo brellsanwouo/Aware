@@ -28,6 +28,10 @@ under `output/batches/<batch-id>/`:
 - `graphs/<problem-id>-causal-graph.png`: graph image when a graph was produced.
 - `memory/<run-id>.db`: one SQLite database per incident when memory is enabled.
 
+CLI IDs use `batch-cli-YYYYMMDDTHHMMSSZ-xxxxxx`; UI IDs use the same UTC
+timestamp format with the `batch-ui-` prefix. `T` separates date and time,
+and `Z` indicates UTC. Existing batch directories keep their original names.
+
 The `results.csv` file includes the path to each incident's memory database. The
 CLI PNG and UI graph identify the selected component, cause, occurrence time
 in the incident's configured timezone, and confidence. Observations without a displayed graph relation are
