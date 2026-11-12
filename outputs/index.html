@@ -479,6 +479,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#batch-results" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batch Results
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#assessment-sections" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -627,6 +638,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#batch-results" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batch Results
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#assessment-sections" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -671,11 +693,36 @@
 <h1 id="outputs">Outputs</h1>
 <p>Each successful or failed run can produce local artifacts and optional SQLite records.</p>
 <h2 id="artifact-files">Artifact Files</h2>
-<p>Runs are saved automatically under:</p>
+<p>Standalone runs are saved automatically under:</p>
 <div class="highlight"><pre><span></span><code>output/json/&lt;timestamp&gt;_&lt;run_id&gt;.json
 output/txt/&lt;timestamp&gt;_&lt;run_id&gt;.txt
 </code></pre></div>
 <p>The JSON artifact contains structured parser, executor, and assessment data. The text artifact is a human-readable report.</p>
+<h2 id="batch-results">Batch Results</h2>
+<p><code>aware batch</code> prints its UTC timestamped batch ID and output directory. Browser
+batches also use a timestamped ID. By default, both interfaces group batch files
+under <code>output/batches/&lt;batch-id&gt;/</code>:</p>
+<ul>
+<li><code>results.csv</code>: one row per incident, with the predicted cause, score, agent count, and artifact paths.</li>
+<li><code>config.json</code>: provider, model, reasoning and memory flags, agent limit, and input locations; no API keys.</li>
+<li><code>problems.csv</code>: snapshot of the incidents selected for this batch.</li>
+<li><code>manifest.json</code>: incident IDs, run IDs, statuses, and journal paths.</li>
+<li><code>incidents/&lt;problem-id&gt;.json</code> and <code>.log</code>: complete event journals and results.</li>
+<li><code>json/</code> and <code>txt/</code>: per-incident structured and readable reports.</li>
+<li><code>graphs/&lt;problem-id&gt;-causal-graph.png</code>: graph image when a graph was produced.</li>
+<li><code>memory/&lt;run-id&gt;.db</code>: one SQLite database per incident when memory is enabled.</li>
+</ul>
+<p>CLI IDs use <code>batch-cli-YYYYMMDDTHHMMSSZ-xxxxxx</code>; UI IDs use the same UTC
+timestamp format with the <code>batch-ui-</code> prefix. <code>T</code> separates date and time,
+and <code>Z</code> indicates UTC. Existing batch directories keep their original names.</p>
+<p>The <code>results.csv</code> file records each incident's predicted and expected cause,
+component/reason/time checks, overall score, agent count, and artifact paths.
+It includes the memory database path when memory is enabled. The CLI PNG and
+UI graph identify the selected component, cause, occurrence time in the
+incident's configured timezone, and confidence. Observations without a
+displayed graph relation appear in a separate <strong>Other findings</strong> area beneath
+the causal chain. Explicit output path overrides may place selected files
+outside this directory.</p>
 <h2 id="assessment-sections">Assessment Sections</h2>
 <p>The final assessment output can include:</p>
 <table>
@@ -714,15 +761,20 @@ output/txt/&lt;timestamp&gt;_&lt;run_id&gt;.txt
 </table>
 <h2 id="sqlite-knowledge-db">SQLite Knowledge DB</h2>
 <p>When memory is enabled, Aware writes runtime information to SQLite.</p>
-<p>Default URL:</p>
-<div class="highlight"><pre><span></span><code>sqlite:///output/assess.db
+<p>Default file path for a standalone run:</p>
+<div class="highlight"><pre><span></span><code>output/memory/run-YYYYMMDDTHHMMSSZ-xxxxxxxx.db
 </code></pre></div>
+<p>For either CLI or browser batches, the default file path is
+<code>output/batches/&lt;batch-id&gt;/memory/&lt;run-id&gt;.db</code>. AWARE logs the resolved
+absolute SQLite URL for the run.
+No memory database is created when <code>AWARE_ENABLE_MEMORY=false</code>.</p>
 <p>Tables:</p>
 <ul>
 <li><code>runs</code></li>
 <li><code>events</code></li>
 <li><code>task_results</code></li>
 <li><code>findings</code></li>
+<li><code>component_memory</code></li>
 </ul>
 <p>This database is useful for later inspection, debugging, and comparing assessment runs.</p>
 

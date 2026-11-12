@@ -360,6 +360,39 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#run-a-dataset-batch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run a Dataset Batch
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#run-an-existing-problems-csv-batch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run an Existing Problems CSV Batch
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#run-the-full-assessment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run the Full Assessment
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#parse-a-request" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -375,17 +408,6 @@
     <span class="md-ellipsis">
       
         Execute an Existing BuildSpec
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#run-the-full-assessment" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run the Full Assessment
       
     </span>
   </a>
@@ -638,6 +660,39 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#run-a-dataset-batch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run a Dataset Batch
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#run-an-existing-problems-csv-batch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run an Existing Problems CSV Batch
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#run-the-full-assessment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run the Full Assessment
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#parse-a-request" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -653,17 +708,6 @@
     <span class="md-ellipsis">
       
         Execute an Existing BuildSpec
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#run-the-full-assessment" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run the Full Assessment
       
     </span>
   </a>
@@ -713,7 +757,74 @@
 
 
 <h1 id="usage">Usage</h1>
-<p>Aware exposes a CLI through the <code>aware</code> command.</p>
+<p>Aware exposes a CLI through the <code>aware</code> command. Use <code>aware batch</code> for a Nezha
+or OpenRCA dataset: it generates incident requests from the catalogue, so you
+provide a dataset path and options instead of writing a <code>--query</code>. Use
+<code>aware assess</code> when you have a single, free-form incident question.</p>
+<h2 id="run-a-dataset-batch">Run a Dataset Batch</h2>
+<p>One command prepares the incident catalogue and analyzes the first five incidents for any supported dataset:</p>
+<div class="highlight"><pre><span></span><code>aware<span class="w"> </span>batch<span class="w"> </span>--dataset<span class="w"> </span>nezha<span class="w"> </span>--source<span class="w"> </span>/path/to/extracted/Nezha<span class="w"> </span>--limit<span class="w"> </span><span class="m">5</span>
+aware<span class="w"> </span>batch<span class="w"> </span>--dataset<span class="w"> </span>openrca_bank<span class="w"> </span>--source<span class="w"> </span>/path/to/extracted/Bank-003<span class="w"> </span>--limit<span class="w"> </span><span class="m">5</span>
+aware<span class="w"> </span>batch<span class="w"> </span>--dataset<span class="w"> </span>openrca_market<span class="w"> </span>--source<span class="w"> </span>/path/to/extracted/Market-002<span class="w"> </span>--limit<span class="w"> </span><span class="m">5</span>
+aware<span class="w"> </span>batch<span class="w"> </span>--dataset<span class="w"> </span>openrca_telecom<span class="w"> </span>--source<span class="w"> </span>/path/to/extracted/Telecom-001<span class="w"> </span>--limit<span class="w"> </span><span class="m">5</span>
+</code></pre></div>
+<p>The values for <code>--dataset</code> match the UI's dataset profiles. Market and Telecom
+must be extracted before use; an archive path alone cannot supply telemetry to
+the Executor. The raw datasets are ignored by Git.</p>
+<p><code>--source</code> points to an extracted dataset directory or a telemetry folder inside it.
+The CLI locates the catalogue above that folder, as the UI does. <code>--limit</code> counts incidents;
+the <code>EXECUTOR_MAX_AGENTS</code> value from <code>.env</code> limits agents created for each
+incident. AWARE saves the exact selected catalogue as <code>problems.csv</code> in the
+batch output directory. OpenRCA uses the same <code>--dataset</code>, <code>--source</code>, and
+<code>--limit</code> options as Nezha; no manual <code>--query</code> or CSV preparation is needed.</p>
+<p>For an explicit run configuration, the same command can include the parser
+retry limit, agent ceiling, and model override:</p>
+<div class="highlight"><pre><span></span><code>aware<span class="w"> </span>batch<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--dataset<span class="w"> </span>openrca_bank<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--source<span class="w"> </span>/path/to/extracted/Bank-003<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--limit<span class="w"> </span><span class="m">5</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--max-agents<span class="w"> </span><span class="m">5</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--max-attempts<span class="w"> </span><span class="m">5</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--llm-model<span class="w"> </span>MODEL_AVAILABLE_ON_YOUR_PROVIDER
+</code></pre></div>
+<p>The provider, its API key, reasoning, and memory are configured in <code>.env</code> or
+the process environment.
+<code>--llm-model</code> overrides the model for the selected provider. <code>--max-agents</code>
+is a total ceiling <strong>per incident</strong>, not a batch-wide count or concurrency
+setting. Without an override, <code>EXECUTOR_MAX_AGENTS</code> in <code>.env</code> applies.</p>
+<h2 id="run-an-existing-problems-csv-batch">Run an Existing Problems CSV Batch</h2>
+<p>Run an AWARE problems CSV using the same timestamped batch directory:</p>
+<div class="highlight"><pre><span></span><code>aware<span class="w"> </span>batch<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--problems-csv<span class="w"> </span>/path/to/problems.csv<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--limit<span class="w"> </span><span class="m">5</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--max-agents<span class="w"> </span><span class="m">8</span>
+</code></pre></div>
+<p>Omit <code>--limit 5</code> to run every CSV incident. Each row may provide its own
+<code>source_path</code>; otherwise pass <code>--repo</code> as a fallback. Expected component, time,
+and reason columns are used only after execution for scoring and are never sent
+to ParserAgent or ExecutorAgent.</p>
+<p>The command writes:</p>
+<ul>
+<li><code>output/batches/&lt;batch-id&gt;/results.csv</code> with component, reason, time, and overall scores;</li>
+<li><code>output/batches/&lt;batch-id&gt;/config.json</code> with the provider, model, reasoning, memory, and agent limit used;</li>
+<li><code>output/batches/&lt;batch-id&gt;/problems.csv</code> with the exact selected incidents, including CSV input batches;</li>
+<li><code>output/batches/&lt;batch-id&gt;/json/</code> and <code>txt/</code> with one report per incident;</li>
+<li><code>output/batches/&lt;batch-id&gt;/manifest.json</code> and per-incident journals in <code>incidents/</code>;</li>
+<li>causal-graph PNGs in <code>graphs/</code> when the graphs are non-empty;</li>
+<li>one SQLite file per incident in <code>memory/</code> when memory is enabled.</li>
+</ul>
+<p>At startup the CLI prints the provider, model, reasoning, memory, incident count,
+and agent limit. At completion it prints the batch ID and output directory.
+The default ID is <code>batch-cli-YYYYMMDDTHHMMSSZ-xxxxxx</code>, using UTC just like the
+UI's <code>batch-ui-</code> IDs. A custom <code>--batch-id</code> replaces the generated ID.
+Explicit <code>--db-url</code>, <code>--results-csv</code>, and <code>--graph-dir</code> paths still take precedence
+and may place those files outside the batch directory.</p>
+<h2 id="run-the-full-assessment">Run the Full Assessment</h2>
+<p>Use <code>assess</code> for the full Parser + Executor workflow.</p>
+<div class="highlight"><pre><span></span><code>aware<span class="w"> </span>assess<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--query<span class="w"> </span><span class="s2">&quot;On 2021-03-04 between 18:30:00 and 19:00:00 checkout timeout&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--repo<span class="w"> </span>/path/to/repository
+</code></pre></div>
 <h2 id="parse-a-request">Parse a Request</h2>
 <p>Use <code>parse</code> when you only want to generate and validate a BuildSpec.</p>
 <div class="highlight"><pre><span></span><code>aware<span class="w"> </span>parse<span class="w"> </span><span class="se">\</span>
@@ -724,12 +835,6 @@
 <p>Use <code>execute</code> when a BuildSpec already exists and you want to run the executor stage.</p>
 <div class="highlight"><pre><span></span><code>aware<span class="w"> </span>execute<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--buildspec-json<span class="w"> </span>/path/to/buildspec.json<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--repo<span class="w"> </span>/path/to/repository
-</code></pre></div>
-<h2 id="run-the-full-assessment">Run the Full Assessment</h2>
-<p>Use <code>assess</code> for the full Parser + Executor workflow.</p>
-<div class="highlight"><pre><span></span><code>aware<span class="w"> </span>assess<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--query<span class="w"> </span><span class="s2">&quot;On 2021-03-04 between 18:30:00 and 19:00:00 checkout timeout&quot;</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--repo<span class="w"> </span>/path/to/repository
 </code></pre></div>
 <h2 id="useful-options">Useful Options</h2>
@@ -743,9 +848,14 @@
 </thead>
 <tbody>
 <tr>
+<td><code>--source</code> (<code>--repo</code>)</td>
+<td>Batch</td>
+<td>Extracted dataset directory, an internal telemetry directory, or fallback telemetry directory for a CSV.</td>
+</tr>
+<tr>
 <td><code>--repo</code></td>
-<td>CLI</td>
-<td>Path to the telemetry repository.</td>
+<td>Parse / Execute / Assess</td>
+<td>Telemetry repository for one incident.</td>
 </tr>
 <tr>
 <td><code>--query</code></td>
@@ -758,19 +868,59 @@
 <td>Path to an existing BuildSpec JSON file.</td>
 </tr>
 <tr>
+<td><code>--problems-csv</code></td>
+<td>Batch</td>
+<td>AWARE problems catalogue to execute.</td>
+</tr>
+<tr>
+<td><code>--dataset</code></td>
+<td>Batch</td>
+<td>Build a catalogue directly from <code>nezha</code>, <code>openrca_bank</code>, <code>openrca_market</code>, or <code>openrca_telecom</code>.</td>
+</tr>
+<tr>
+<td><code>--limit</code></td>
+<td>Batch</td>
+<td>Number of incidents to analyze.</td>
+</tr>
+<tr>
+<td><code>--max-attempts</code></td>
+<td>Parse / Assess / Batch</td>
+<td>Maximum Parser retry attempts; overrides <code>PARSER_MAX_ATTEMPTS</code>.</td>
+</tr>
+<tr>
+<td><code>--batch-id</code></td>
+<td>Batch</td>
+<td>Custom batch directory ID; otherwise a UTC timestamped ID is generated.</td>
+</tr>
+<tr>
+<td><code>--results-csv</code></td>
+<td>Batch</td>
+<td>Results and scoring CSV destination.</td>
+</tr>
+<tr>
+<td><code>--graph-dir</code></td>
+<td>Batch</td>
+<td>V3 causal graph PNG directory.</td>
+</tr>
+<tr>
 <td><code>--db-url</code></td>
-<td>Execute / Assess</td>
+<td>Execute / Assess / Batch</td>
 <td>SQLite database URL override.</td>
 </tr>
 <tr>
 <td><code>--max-agents</code></td>
-<td>Execute / Assess</td>
-<td>Maximum number of executor sub-agents.</td>
+<td>Execute / Assess / Batch</td>
+<td>Maximum number of executor sub-agents per incident.</td>
 </tr>
 <tr>
 <td><code>--llm-model</code></td>
-<td>Parser / Assess</td>
-<td>OpenAI model override.</td>
+<td>Parser / Assess / Batch</td>
+<td>LLM model override.</td>
+</tr>
+<tr>
+<td><code>--json</code></td>
+<td>CLI</td>
+<td>JSON output; for <code>batch</code>, prints the final summary as JSON.</td>
 </tr>
 </tbody>
 </table>

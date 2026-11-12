@@ -484,6 +484,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#batch-cli-parameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batch CLI parameters
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -670,6 +681,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#batch-cli-parameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batch CLI parameters
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -691,9 +713,13 @@
 
 
 <h1 id="configuration">Configuration</h1>
-<p>Aware reads configuration from environment variables and optional CLI parameters.</p>
+<p>Aware reads configuration from environment variables and optional CLI parameters.
+The same provider and runtime settings apply to dataset batches in the CLI and UI.</p>
 <h2 id="llm-provider">LLM Provider</h2>
-<p>Aware currently uses an OpenAI-compatible provider.</p>
+<p>Aware supports OpenAI-compatible APIs and Ollama Cloud. Select the provider with
+<code>AWARE_LLM_PROVIDER</code> (<code>openai-compatible</code> by default, or <code>ollama</code>). The <code>ollama</code>
+value selects the cloud endpoint, not a local Ollama process.
+<code>ollama-cloud</code> remains an accepted alias.</p>
 <table>
 <thead>
 <tr>
@@ -705,8 +731,8 @@
 <tbody>
 <tr>
 <td><code>OPENAI_API_KEY</code></td>
-<td>Required</td>
-<td>API key used by the LLM client.</td>
+<td>Required for <code>openai-compatible</code></td>
+<td>API key used by the OpenAI-compatible client.</td>
 </tr>
 <tr>
 <td><code>OPENAI_BASE_URL</code></td>
@@ -720,6 +746,23 @@
 </tr>
 </tbody>
 </table>
+<p>For Ollama Cloud, set:</p>
+<div class="highlight"><pre><span></span><code>AWARE_LLM_PROVIDER=ollama
+OLLAMA_API_KEY=your_ollama_cloud_api_key
+OLLAMA_MODEL=gemma4:31b
+</code></pre></div>
+<p><code>OLLAMA_BASE_URL</code> defaults to <code>https://ollama.com/v1</code>, and
+<code>OLLAMA_TIMEOUT_SECONDS</code> defaults to <code>120</code>. Use a model available in your
+Ollama Cloud account. The <code>--llm-model</code> CLI option takes precedence over
+<code>OLLAMA_MODEL</code>; the UI uses <code>OLLAMA_MODEL</code>. With the OpenAI-compatible provider,
+<code>--llm-model</code> similarly overrides <code>OPENAI_MODEL</code>. The active model is resolved
+from the selected provider at the start of each run.</p>
+<p>The Ollama Cloud adapter includes the expected JSON schema in the prompt
+instead of sending a <code>response_format</code> parameter. Aware checks returned JSON
+in the Parser and Executor and retries invalid Parser results. An Executor
+response that cannot be parsed falls back to its existing heuristic path.
+An API key is required; keep it in <code>.env</code> or the process environment, not in
+a command argument.</p>
 <h2 id="parser-and-executor">Parser and Executor</h2>
 <table>
 <thead>
@@ -738,7 +781,12 @@
 <tr>
 <td><code>EXECUTOR_MAX_AGENTS</code></td>
 <td><code>5</code></td>
-<td>Global limit for instantiated executor sub-agents.</td>
+<td>Maximum total Executor sub-agents created per incident analysis, including initial domain agents, V3 specialists, and focused follow-ups. The value is displayed in the UI.</td>
+</tr>
+<tr>
+<td><code>EXECUTOR_MAX_EXPANSIONS</code></td>
+<td><code>2</code></td>
+<td>Maximum focused follow-up agents after the initial domain coverage; clamped to 0–4.</td>
 </tr>
 <tr>
 <td><code>AWARE_PARSER_KB_FILE</code></td>
@@ -746,12 +794,13 @@
 <td>Parser knowledge file path.</td>
 </tr>
 <tr>
-<td><code>AWARE_EXECUTOR_KB_FILE</code></td>
-<td><code>knowledge/executor_rca_kb.md</code></td>
-<td>Executor knowledge file path.</td>
+<td><code>AWARE_EXECUTOR_V3_KB_FILE</code></td>
+<td><code>knowledge/executor_rca_v3_kb.md</code></td>
+<td>V3 mechanism-oriented technical knowledge.</td>
 </tr>
 </tbody>
 </table>
+<p>Seed analysis is demand-driven: metrics run first, followed by logs and traces, then independent V3 metric experts when metrics are available. The safety limit is a ceiling, not a target agent count. Each batch incident gets its own SQLite database by default when memory is enabled.</p>
 <h2 id="runtime-toggles">Runtime Toggles</h2>
 <table>
 <thead>
@@ -777,16 +826,34 @@
 <p>When <code>AWARE_ENABLE_REASONING=false</code>, the LLM is still used, but prompts are more direct.</p>
 <p>When <code>AWARE_ENABLE_MEMORY=false</code>, inter-agent memory and SQLite writes are disabled.</p>
 <h2 id="knowledge-db">Knowledge DB</h2>
-<p>Default database URL:</p>
-<div class="highlight"><pre><span></span><code>sqlite:///output/assess.db
+<p>Default database file path (one file per run):</p>
+<div class="highlight"><pre><span></span><code>output/memory/run-YYYYMMDDTHHMMSSZ-xxxxxxxx.db
 </code></pre></div>
+<p>The timestamp is UTC and the suffix prevents collisions when runs start in the
+same second. CLI and UI batch incidents each receive a separate database under
+<code>output/batches/&lt;batch-id&gt;/memory/</code>. AWARE resolves the path to an absolute
+SQLite URL, which is included in the run's event stream and artifacts. The
+default database is created when analysis
+starts; the UI does not restore a previously saved database URL.</p>
 <p>Override it from the CLI:</p>
 <div class="highlight"><pre><span></span><code>aware<span class="w"> </span>assess<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--query<span class="w"> </span><span class="s2">&quot;checkout timeout&quot;</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--repo<span class="w"> </span>/path/to/repository<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--db-url<span class="w"> </span>sqlite:///output/custom-assess.db
 </code></pre></div>
-<p>Or from the UI using the <code>DB URL</code> field.</p>
+<p>An explicit CLI URL intentionally reuses that database and may put it outside
+the batch directory. UI API callers can also pass an explicit <code>db_url</code> request
+parameter; the browser UI uses a fresh database for each run.</p>
+<h2 id="batch-cli-parameters">Batch CLI parameters</h2>
+<p><code>aware batch</code> accepts <code>--dataset</code> (<code>nezha</code>, <code>openrca_bank</code>, <code>openrca_market</code>,
+or <code>openrca_telecom</code>) and <code>--source</code> for an extracted dataset. <code>--limit</code> selects
+the number of incidents; <code>--max-agents</code>, <code>--max-attempts</code>, and <code>--llm-model</code>
+override the corresponding runtime values for that command. <code>--batch-id</code>,
+<code>--results-csv</code>, <code>--graph-dir</code>, <code>--db-url</code>, and <code>--json</code> control naming, output
+locations, and the printed summary. Omitting the output overrides keeps the
+generated files together in one timestamped batch directory. See <a href="../usage/">Usage</a>.</p>
+<p>The UI refreshes the configured provider and model from <code>.env</code> while it is
+open. Values explicitly exported in the server's shell still take precedence.</p>
 
 
 

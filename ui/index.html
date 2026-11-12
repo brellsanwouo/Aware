@@ -420,6 +420,56 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#nezha-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Nezha example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#nezha-dataset-batch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Nezha dataset batch
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Nezha dataset batch">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#adaptive-agent-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adaptive agent lifecycle
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openrca-bank-market-and-telecom" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenRCA Bank, Market, and Telecom
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#typical-flow" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -660,6 +710,56 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#nezha-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Nezha example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#nezha-dataset-batch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Nezha dataset batch
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Nezha dataset batch">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#adaptive-agent-lifecycle" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adaptive agent lifecycle
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openrca-bank-market-and-telecom" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenRCA Bank, Market, and Telecom
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#typical-flow" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -698,6 +798,10 @@
 <p>Open:</p>
 <div class="highlight"><pre><span></span><code>http://127.0.0.1:8787
 </code></pre></div>
+<p>The UI always runs the V3 strategy. V3 keeps the initial opinions independent, adds conservative JVM, MySQL, and
+Redis metric experts, reconciles their evidence after analysis, and emits an
+inspectable causal graph. The graph separates raw evidence, observed components,
+candidate hypotheses, contradictions, and the selected outcome.</p>
 <h2 id="main-inputs">Main Inputs</h2>
 <table>
 <thead>
@@ -708,35 +812,126 @@
 </thead>
 <tbody>
 <tr>
-<td>Source Path</td>
-<td>Path to the telemetry repository or source directory.</td>
+<td>Run mode</td>
+<td><code>Dataset batch</code> prepares and runs catalogue incidents; <code>Single problem</code> runs one manually entered incident question.</td>
 </tr>
 <tr>
-<td>DB URL</td>
-<td>Optional SQLite database URL.</td>
+<td>Dataset</td>
+<td>Select <code>Nezha</code>, <code>OpenRCA · Bank</code>, <code>OpenRCA · Market</code>, or <code>OpenRCA · Telecom</code> to activate the corresponding paths, timezone, catalogue, and telemetry layout.</td>
 </tr>
 <tr>
-<td>Max Agents</td>
-<td>Optional limit for executor sub-agent instantiation.</td>
+<td>Telemetry directory</td>
+<td>Path to the extracted dataset or one of its telemetry folders. For a batch, the backend finds the incident labels higher in that dataset and uses the right source directory for each incident.</td>
 </tr>
 <tr>
-<td>User Query</td>
-<td>Incident request sent to the Parser agent.</td>
+<td>Incident question</td>
+<td>Required only in <code>Single problem</code> mode. Include the date and start/end of the failure interval. Dataset batches generate this question from the catalogue.</td>
 </tr>
 </tbody>
 </table>
+<p>The incident timezone is selected automatically from the dataset profile
+(Nezha uses UTC; OpenRCA and Generic default to UTC+08:00). The UI displays
+the <code>EXECUTOR_MAX_AGENTS</code> limit from <code>.env</code> beneath Model, Reasoning, and Memory.
+This is the total number of Executor agents that may be created for one incident,
+including initial domain agents, V3 specialists, and focused follow-ups; it is
+not a concurrency limit. The default is 5. Each incident in a batch has its own
+limit.
+Each run uses a separate SQLite memory file; the memory database control is
+hidden in the UI.</p>
 <h2 id="runtime-panels">Runtime Panels</h2>
 <ul>
-<li><strong>Live Agent Conversation</strong> shows streamed events from the user, system, Parser agent, Executor agent, and dynamic sub-agents.</li>
-<li><strong>Current Agent Tasks</strong> summarizes each active agent and its latest status.</li>
-<li><strong>BuildSpec</strong> displays the Parser output.</li>
-<li><strong>Root Cause Synthesis</strong>, <strong>Findings</strong>, <strong>Anomalies</strong>, and <strong>Final Reporting</strong> display the structured assessment output.</li>
+<li><strong>Dashboard</strong> opens first. It shows the selected dataset, mode and telemetry directory, background incident preparation, batch progress, run metrics, the latest diagnosis and recent agent activity. Result and event links appear when those outputs exist.</li>
+<li>The configuration sidebar keeps the launch controls and runtime status together. On smaller screens, the dashboard appears first with a link to the configuration form; launching returns to the dashboard.</li>
+<li><strong>Assessment summary</strong> surfaces the component, reason, occurrence time, and confidence.</li>
+<li><strong>Live analysis</strong> shows streamed events and the latest state of each agent for both single incidents and batches.</li>
+<li><strong>Findings</strong> presents evidence and anomalies as readable cards.</li>
+<li><strong>Causal graph</strong> shows the selected component, cause, time, and confidence above the diagram and inside the outcome node when a diagnosis is available. Evidence, components, hypotheses, and the outcome are grouped in related rows. Unlinked observations appear in a separate, shaded <strong>Other findings</strong> section below the causal chain; their horizontal position does not imply a relation to a component or hypothesis. Select a node by mouse or keyboard to highlight its direct relations and read its full label and provenance. The graph fits the available width on desktop; small screens keep readable text with horizontal scrolling. <code>Export SVG</code> saves a scalable vector image. <code>Export PNG</code> saves the complete graph at up to 4× resolution, capped at 24 megapixels, with a white background, regardless of the current zoom or selection.</li>
+<li><strong>Technical data</strong> keeps the BuildSpec, scope, synthesis, and final JSON available for inspection.</li>
+<li>Run metrics show elapsed time, event count, finding count, the exact number of ephemeral agents created, and execution state.</li>
 </ul>
+<p>The dataset and source path are retained locally in the browser. Live monitoring can be disconnected; this closes the browser stream but does not cancel an assessment already running on the server.</p>
+<h2 id="nezha-example">Nezha example</h2>
+<p>Select <code>Nezha</code>. The UI switches the timezone to <code>UTC</code>, uses the configured agent limit, uses the locally extracted example when available, and inserts this question:</p>
+<div class="highlight"><pre><span></span><code>On January 30, 2023, between 11:50:30 and 11:53:30 UTC, one failure occurred. Identify the root cause component, occurrence time, and reason.
+</code></pre></div>
+<p>The interval must contain UTC clock times as stored by Nezha. No manual conversion to UTC+08 is needed. The final occurrence timestamp is displayed as a readable date and time in the selected timezone.</p>
+<h2 id="nezha-dataset-batch">Nezha dataset batch</h2>
+<p>The UI supports both <code>Single problem</code> and <code>Dataset batch</code> run modes. To assess the complete dataset:</p>
+<ol>
+<li>Select <code>Nezha</code> and <code>Dataset batch</code>.</li>
+<li>Enter the extracted dataset directory or a telemetry folder inside it. The backend finds the official <code>*-fault_list.json</code> files and the UI shows the incident count when ready.</li>
+<li>Leave <code>Problem limit</code> blank to run all incidents, or enter a smaller number for a smoke test.</li>
+<li>Click <code>Analyze batch</code>. If preparation is still running, the click waits for it and then starts the batch.</li>
+</ol>
+<p>There is no problems CSV download or upload step in the UI. The backend returns the prepared incidents directly and the browser reuses that list when the batch starts.</p>
+<p>Problems run sequentially. Once the backend prepares the incidents, the full queue is visible with a <code>PENDING</code> status. During execution, exactly one row changes to <code>RUNNING</code>; completed rows become <code>PASS</code>, <code>FAIL</code>, or <code>ERROR</code>. The <code>Agents</code> column reports how many ephemeral agents were created for each incident. The <code>Graph</code> column opens the causal graph for that row. The graph view also provides an incident selector, so completing a later assessment does not remove access to earlier graphs in the same batch. The browser also shows progress, overall success rate, and separate component, reason, and time rates. <code>Export results CSV</code> downloads the detailed predictions, agent counts, scores, run IDs, and log links after at least one problem completes.</p>
+<p>If execution fails, the incident row shows <code>ERROR</code> and the error message. The live event feed remains available during a batch, so a run that is still working is distinguishable from one that failed to start. The batch control is labelled <code>Stop batch</code>; it stops the browser queue while an assessment already started on the server may continue.</p>
+<p>Every browser batch receives a UTC timestamped ID such as <code>batch-ui-20261112T143015Z-a1b2c3</code>. Before analysis, the backend saves the selected incidents and runtime configuration. Each incident then writes its memory, reports, graph, result row, and complete journals inside that batch directory, even if the browser connection closes:</p>
+<div class="highlight"><pre><span></span><code>output/batches/&lt;batch_id&gt;/
+├── config.json
+├── problems.csv
+├── results.csv
+├── manifest.json
+├── incidents/&lt;problem_id&gt;.json and .log
+├── json/ and txt/
+├── graphs/&lt;problem_id&gt;-causal-graph.png
+└── memory/&lt;run_id&gt;.db
+</code></pre></div>
+<p>The graph file is written when a causal graph exists, and the SQLite file when memory is enabled. An explicit database URL supplied by an API caller can place memory outside the batch directory; the browser uses the per-run default. The JSON journal contains the run ID, status, exact agent count, every emitted runtime event, artifact paths, error details, the causal graph when produced, and the complete result payload. The batch table exposes <code>JSON</code> and <code>TXT</code> links per incident, while <code>Backend batch log</code> opens the manifest for the whole batch.</p>
+<p>Each prepared incident contains:</p>
+<div class="highlight"><pre><span></span><code>problem_id,system,date,start_time,end_time,timezone_offset_minutes,source_path,expected_component,expected_time,expected_reason
+</code></pre></div>
+<p>The generated catalogue contains 56 OnlineBoutique incidents and 45 TrainTicket incidents. Each row is a simple incident, not a Parser task. The UI constructs the standard diagnostic question from its date and UTC interval. Ground-truth columns are only used by the browser to score a completed diagnosis; they are not sent to ParserAgent or ExecutorAgent.</p>
+<p>Scoring is deliberately strict and reproducible:</p>
+<ul>
+<li>component: exact pod-name match;</li>
+<li>reason: normalized match, so <code>network_delay</code> and <code>network delay</code> are equivalent;</li>
+<li>occurrence time: predicted UNIX timestamp within 60 seconds of the label;</li>
+<li>overall success: all three checks pass.</li>
+</ul>
+<h3 id="adaptive-agent-lifecycle">Adaptive agent lifecycle</h3>
+<p>Nezha uses the configured runtime agent limit. ExecutorAgent creates at most one seed agent per available domain, in the order metrics, logs, then traces. All selected files in a domain are consolidated into one context and one LLM decision, so neither the number of files nor the number of CSV shards multiplies the number of agents or model calls. Each ephemeral agent reads shared memory, analyzes its assigned evidence need, writes its result and findings to SQLite, and terminates.</p>
+<p>After each useful seed result, strict convergence rules may cancel domains that can no longer change the result: one unique long-form KPI anomaly can stop after metrics, and one repeated local return/exception can stop after logs. Propagated caller errors and competing hypotheses never trigger this shortcut. Otherwise a cross-domain synthesis checkpoint runs after normal coverage. A medium/low-confidence result, any unresolved field, or an explicit coordinator verification request can create a component-focused follow-up even when a provisional component has already been named. Requested domains may revisit the same files with this narrower focus. There are at most two follow-ups and no recursive expansion, so the normal range is one to three seed agents and five remains the default hard adaptive maximum.</p>
+<p>Canonical dataset incidents for Nezha and OpenRCA use a deterministic, validated Parser fast path. Free-form questions still use the retrying Parser LLM. OpenRCA catalogues join the official observation windows from <code>query.csv</code> with the component, timestamp, and reason ground truth from <code>record.csv</code>; a window is split at midpoints only when it contains multiple labelled incidents.</p>
+<p>The root-cause reason list in executor knowledge is a non-exhaustive candidate vocabulary. Agents may add a telemetry-backed novel cause; absence from the initial list does not invalidate it.</p>
+<h2 id="openrca-bank-market-and-telecom">OpenRCA Bank, Market, and Telecom</h2>
+<p>The three OpenRCA datasets use local datetimes in <code>UTC+08:00</code>. Their <code>record.csv</code> timestamps are converted consistently with that offset; do not select UTC for these catalogues.</p>
+<p>Select the desired OpenRCA dataset, <code>Dataset batch</code>, and its telemetry directory. The backend prepares the catalogue automatically and populates the incident queue. Each catalogue contains one simple full-RCA incident per ground-truth record:</p>
+<p>The CLI uses the same dataset preparation with <code>aware batch --dataset openrca_bank --source /path/to/extracted/Bank-003 --limit 5</code> (or <code>openrca_market</code> / <code>openrca_telecom</code>). The <code>--source</code> directory must be extracted before analysis.</p>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th style="text-align: right;">Problems</th>
+<th>Systems</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Bank</td>
+<td style="text-align: right;">136</td>
+<td><code>bank</code></td>
+</tr>
+<tr>
+<td>Market</td>
+<td style="text-align: right;">148</td>
+<td><code>cloudbed-1</code> and <code>cloudbed-2</code></td>
+</tr>
+<tr>
+<td>Telecom</td>
+<td style="text-align: right;">51</td>
+<td><code>telecom</code></td>
+</tr>
+</tbody>
+</table>
+<p>Each problem asks for component, occurrence time, and reason using the official interval parsed from <code>query.csv</code>. This avoids converting the benchmark's partial <code>task_1</code>–<code>task_7</code> questions into UI tasks. When an official query interval contains several labelled failures, it is divided at the midpoint between consecutive <code>record.csv</code> occurrences so that every UI row remains a single incident. Market rows automatically point to the correct cloudbed directory.</p>
+<p>OpenRCA file selection is deterministic: only telemetry files below the incident's <code>YYYY_MM_DD</code> directory are passed to ExecutorAgent. A telemetry family may be explicitly empty when it does not exist. In particular, Telecom contains traces and metrics but no log files, so its BuildSpec uses <code>absolute_log_file: []</code> instead of inventing a path or rejecting the incident.</p>
+<p>Agent counts, per-incident JSON/TXT journals, the batch manifest, scoring, and results CSV work exactly as described for Nezha. The dataset profile is also inferred from each problem ID during a batch, preventing an accidentally selected UI profile from applying Nezha rules to an OpenRCA CSV.</p>
 <h2 id="typical-flow">Typical Flow</h2>
 <ol>
-<li>Enter the telemetry repository path.</li>
-<li>Enter the incident query.</li>
-<li>Click <code>Run Assess</code>.</li>
+<li>Select the dataset profile.</li>
+<li>Enter the telemetry directory and incident query.</li>
+<li>Click <code>Analyze incident</code>.</li>
 <li>Watch Parser validation and Executor analysis events.</li>
 <li>Review the final JSON sections in the result panels.</li>
 </ol>

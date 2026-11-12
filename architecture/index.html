@@ -468,6 +468,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#batch-persistence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batch persistence
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -692,6 +703,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#batch-persistence" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batch persistence
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -713,18 +735,19 @@
 
 
 <h1 id="architecture">Architecture</h1>
-<p>Aware is organized around a small agent runtime with explicit boundaries between parsing, execution, tools, templates, and persistence.</p>
+<p>Aware is organized around a V3 agent runtime with explicit boundaries between dataset preparation, parsing, execution, tools, templates, and persistence. The UI and CLI share the same dataset catalogue builders and source-directory resolver.</p>
 <h2 id="runtime-flow">Runtime Flow</h2>
-<div class="highlight"><pre><span></span><code>User Query
-  -&gt; ParserAgent
+<div class="highlight"><pre><span></span><code>Dataset + extracted source -&gt; Nezha/OpenRCA catalogue -&gt; incident request
+Single incident question -----------------------------&gt; incident request
+Incident request -&gt; ParserAgent
   -&gt; BuildSpec
   -&gt; ExecutorAgent
-  -&gt; Dynamic sub-agents
-  -&gt; Findings / anomalies / preliminary causes
-  -&gt; Artifacts and optional SQLite memory
+  -&gt; Metrics, logs, traces, and focused V3 sub-agents
+  -&gt; Findings, root-cause synthesis, and causal graph
+  -&gt; Scores, reports, journals, and optional SQLite memory
 </code></pre></div>
 <h2 id="parser-agent">Parser Agent</h2>
-<p><code>ParserAgent</code> converts a user incident request into a BuildSpec. It loads BuildSpec rules from:</p>
+<p><code>ParserAgent</code> converts an incident request into a BuildSpec. Canonical Nezha and OpenRCA batch incidents take a deterministic, validated parser path; free-form questions use the retrying LLM parser. It loads BuildSpec rules from:</p>
 <div class="highlight"><pre><span></span><code>knowledge/parser_buildspec_kb.md
 </code></pre></div>
 <p>The knowledge file contains:</p>
@@ -735,12 +758,12 @@
 <li>file selection rules for logs, traces, and metrics</li>
 </ul>
 <h2 id="executor-agent">Executor Agent</h2>
-<p><code>ExecutorAgent</code> instantiates sub-agents from templates and coordinates their analysis against selected telemetry files.</p>
+<p><code>ExecutorAgent</code> instantiates sub-agents from templates and coordinates their analysis against selected telemetry files. The metrics, logs, and traces domains run as needed; V3 specialists and focused follow-ups can investigate unresolved evidence. <code>EXECUTOR_MAX_AGENTS</code> is a ceiling on all agents created <strong>per incident</strong>, including those follow-ups. It is not a concurrency setting.</p>
 <p>Implementation:</p>
 <div class="highlight"><pre><span></span><code>agents/executor_agent.py
 </code></pre></div>
 <p>Executor knowledge is loaded from:</p>
-<div class="highlight"><pre><span></span><code>knowledge/executor_rca_kb.md
+<div class="highlight"><pre><span></span><code>knowledge/executor_rca_v3_kb.md
 </code></pre></div>
 <h2 id="dynamic-agent-templates">Dynamic Agent Templates</h2>
 <p>Executor sub-agents are defined in:</p>
@@ -768,6 +791,12 @@
 <li><code>max_numeric_column</code></li>
 </ul>
 <p>These helpers keep data access and time-window filtering outside of agent orchestration.</p>
+<h2 id="batch-persistence">Batch persistence</h2>
+<p>By default, each CLI or UI batch gets a UTC timestamped directory under
+<code>output/batches/&lt;batch-id&gt;/</code>. It contains <code>problems.csv</code>, <code>config.json</code>,
+<code>results.csv</code>, per-incident journals and reports, and graph PNGs when a causal
+graph is produced. With memory enabled, each incident gets its own SQLite file
+under <code>memory/</code>. See <a href="../outputs/">Outputs</a> for the full layout.</p>
 
 
 

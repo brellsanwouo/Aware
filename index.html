@@ -689,20 +689,22 @@
 
 
 <h1 id="aware">Aware</h1>
-<p>Aware is a minimal <strong>Assess</strong> prototype for telemetry-based root-cause analysis. It combines a Parser agent, an Executor agent, and dynamic analysis sub-agents to turn an incident question into a validated BuildSpec and an execution report.</p>
-<p>The primary interface is the <code>aware</code> CLI. A lightweight web UI is also available for live inspection of agent events and structured outputs.</p>
+<p>Aware is a V3 <strong>Assess</strong> prototype for telemetry-based root-cause analysis. It combines a Parser agent, an Executor agent, and dynamic analysis sub-agents to identify an incident's root-cause component, occurrence time, and reason.</p>
+<p>Both the <code>aware</code> CLI and the web UI can analyze one incident or a dataset batch. Nezha and OpenRCA Bank, Market, and Telecom batches use the same dataset catalogue preparation. The CLI batch command needs a dataset name and an extracted source directory; AWARE generates each incident request automatically.</p>
 <p>The project focuses on a clear runtime flow:</p>
 <ul>
-<li>parse the user request into a BuildSpec</li>
+<li>prepare dataset incidents or parse a free-form request into a BuildSpec</li>
 <li>select the relevant telemetry files</li>
-<li>run specialized log, trace, and metrics agents</li>
+<li>run specialized log, trace, and metrics agents under a per-incident agent limit</li>
 <li>filter analysis on <code>failure_time_range_ts</code></li>
-<li>persist run artifacts as JSON, text, and optional SQLite records</li>
+<li>report the selected root cause and a causal evidence graph</li>
+<li>persist batch scores, journals, JSON/text reports, graphs, and optional SQLite memory</li>
 </ul>
 <h2 id="technology-stack">Technology Stack</h2>
 <p><img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat&amp;logo=python&amp;logoColor=white" />
 <img alt="Google ADK" src="https://img.shields.io/badge/Google%20ADK-enabled-4285F4?style=flat&amp;logo=google&amp;logoColor=white" />
-<img alt="OpenAI" src="https://img.shields.io/badge/OpenAI-enabled-412991?style=flat&amp;logo=openai&amp;logoColor=white" />
+<img alt="OpenAI-compatible" src="https://img.shields.io/badge/OpenAI--compatible-enabled-412991?style=flat" />
+<img alt="Ollama Cloud" src="https://img.shields.io/badge/Ollama%20Cloud-enabled-111827?style=flat" />
 <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-supported-009688?style=flat&amp;logo=fastapi&amp;logoColor=white" />
 <img alt="Pydantic" src="https://img.shields.io/badge/Pydantic-2.x-E92063?style=flat&amp;logo=pydantic&amp;logoColor=white" />
 <img alt="SQLite" src="https://img.shields.io/badge/SQLite-supported-003B57?style=flat&amp;logo=sqlite&amp;logoColor=white" /></p>
@@ -717,11 +719,11 @@
 <tbody>
 <tr>
 <td>CLI</td>
-<td>Running parser-only, executor-only, or full assessment workflows from a terminal.</td>
+<td>Running dataset batches or parser-only, executor-only, and single-incident assessments.</td>
 </tr>
 <tr>
 <td>Web UI</td>
-<td>Watching live agent events and reviewing structured outputs interactively.</td>
+<td>Running dataset batches or single incidents while inspecting live events and results.</td>
 </tr>
 </tbody>
 </table>
@@ -752,7 +754,7 @@
 </tr>
 <tr>
 <td>Knowledge DB</td>
-<td>Stores runs, events, task results, and findings in SQLite when memory is enabled.</td>
+<td>Stores runs, events, task results, and findings in a per-run SQLite file when memory is enabled.</td>
 </tr>
 </tbody>
 </table>

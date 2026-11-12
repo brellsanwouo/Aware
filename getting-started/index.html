@@ -355,10 +355,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#configure-environment" class="md-nav__link">
+  <a href="#choose-an-llm-provider" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Configure Environment
+        Choose an LLM provider
       
     </span>
   </a>
@@ -366,10 +366,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#first-run" class="md-nav__link">
+  <a href="#run-a-dataset-batch" class="md-nav__link">
     <span class="md-ellipsis">
       
-        First Run
+        Run a dataset batch
       
     </span>
   </a>
@@ -649,10 +649,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#configure-environment" class="md-nav__link">
+  <a href="#choose-an-llm-provider" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Configure Environment
+        Choose an LLM provider
       
     </span>
   </a>
@@ -660,10 +660,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#first-run" class="md-nav__link">
+  <a href="#run-a-dataset-batch" class="md-nav__link">
     <span class="md-ellipsis">
       
-        First Run
+        Run a dataset batch
       
     </span>
   </a>
@@ -694,32 +694,49 @@
 <h2 id="requirements">Requirements</h2>
 <ul>
 <li>Python 3.11 or newer</li>
-<li>An OpenAI-compatible API key</li>
-<li>A telemetry repository containing logs, traces, and metrics to analyze</li>
+<li>An OpenAI-compatible API endpoint and key, or an Ollama Cloud account and API key</li>
+<li>An <strong>extracted</strong> Nezha or OpenRCA dataset with its incident labels and telemetry</li>
 </ul>
+<p>The raw datasets are excluded from Git. Download and extract the dataset you want
+to analyze before running a batch. A ZIP file alone is not a valid <code>--source</code> for
+execution.</p>
 <h2 id="install">Install</h2>
-<p>Create and activate a virtual environment:</p>
+<p>Create a virtual environment and install AWARE:</p>
 <div class="highlight"><pre><span></span><code>python3.11<span class="w"> </span>-m<span class="w"> </span>venv<span class="w"> </span>.venv
 <span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span>.
 </code></pre></div>
-<p>Install the project in editable mode with development dependencies:</p>
-<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[dev]&quot;</span>
+<p>Install the test and documentation dependencies only when needed:</p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[dev,docs]&quot;</span>
 </code></pre></div>
-<h2 id="configure-environment">Configure Environment</h2>
-<p>Create a local <code>.env</code> file:</p>
+<h2 id="choose-an-llm-provider">Choose an LLM provider</h2>
+<p>Copy the configuration template:</p>
 <div class="highlight"><pre><span></span><code>cp<span class="w"> </span>.env.example<span class="w"> </span>.env
 </code></pre></div>
-<p>Then set at least:</p>
-<div class="highlight"><pre><span></span><code><span class="nv">OPENAI_API_KEY</span><span class="o">=</span>your_api_key
+<p>For an OpenAI-compatible API, set <code>AWARE_LLM_PROVIDER=openai-compatible</code>,
+<code>OPENAI_API_KEY</code>, and <code>OPENAI_MODEL</code>. For Ollama Cloud, set
+<code>AWARE_LLM_PROVIDER=ollama</code>, <code>OLLAMA_API_KEY</code>, and <code>OLLAMA_MODEL</code>. The <code>ollama</code>
+provider name selects <strong>Ollama Cloud</strong>. See <a href="../configuration/">Configuration</a>
+for the endpoint and runtime settings. Keep actual keys in <code>.env</code> or your shell;
+<code>.env</code> is ignored by Git.</p>
+<h2 id="run-a-dataset-batch">Run a dataset batch</h2>
+<p>Analyze the first five incidents from an extracted Nezha dataset:</p>
+<div class="highlight"><pre><span></span><code>aware<span class="w"> </span>batch<span class="w"> </span>--dataset<span class="w"> </span>nezha<span class="w"> </span>--source<span class="w"> </span>/path/to/extracted/Nezha<span class="w"> </span>--limit<span class="w"> </span><span class="m">5</span>
 </code></pre></div>
-<p>Optional values can be added later for model selection, database storage, parser attempts, and runtime toggles. See <a href="../configuration/">Configuration</a>.</p>
-<h2 id="first-run">First Run</h2>
-<p>Run the full parser + executor flow:</p>
-<div class="highlight"><pre><span></span><code>aware<span class="w"> </span>assess<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--query<span class="w"> </span><span class="s2">&quot;On 2021-03-04 between 18:30:00 and 19:00:00 checkout timeout&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--repo<span class="w"> </span>/path/to/repository
+<p>OpenRCA uses the same command structure. For example:</p>
+<div class="highlight"><pre><span></span><code>aware<span class="w"> </span>batch<span class="w"> </span>--dataset<span class="w"> </span>openrca_bank<span class="w"> </span>--source<span class="w"> </span>/path/to/extracted/Bank-003<span class="w"> </span>--limit<span class="w"> </span><span class="m">5</span>
 </code></pre></div>
-<p>The command produces a validated BuildSpec, launches executor sub-agents, and saves run artifacts under <code>output/</code>.</p>
+<p>Use <code>openrca_market</code> or <code>openrca_telecom</code> for the other OpenRCA datasets.
+<code>--source</code> may also point to a telemetry folder inside an extracted dataset.
+AWARE prepares the incident requests from the catalogue, so a batch does not
+need <code>--query</code> or a manually prepared CSV. <code>--max-agents 5</code> can override the
+per-incident agent ceiling from <code>.env</code>.</p>
+<p>At startup, the CLI reports the provider, model, reasoning and memory settings,
+incident count, and agent limit. It writes a timestamped directory under
+<code>output/batches/</code> containing the selected catalogue, scores, reports, graphs,
+journals, and one SQLite memory file per incident when memory is enabled.</p>
+<p>For the browser interface, run <code>aware ui --host 127.0.0.1 --port 8787</code> and
+open <code>http://127.0.0.1:8787</code>. See <a href="../ui/">Web UI</a> for its batch workflow.</p>
 
 
 
