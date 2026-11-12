@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ def export_causal_graph_png(
     output_path: str | Path,
     *,
     scale: int = 3,
+    timezone_offset_minutes: int = 0,
 ) -> Path:
     """Render evidence→component→hypothesis→outcome as a readable PNG."""
     payload = graph.model_dump(mode="json") if isinstance(graph, CausalGraph) else graph
@@ -26,13 +28,13 @@ def export_causal_graph_png(
     scale = max(1, min(int(scale), 4))
     kinds = ("evidence", "component", "hypothesis", "outcome")
     labels = {
-        "evidence": "EVIDENCE",
-        "component": "COMPONENTS",
-        "hypothesis": "HYPOTHESES",
-        "outcome": "OUTCOME",
+        "evidence": "Evidence",
+        "component": "Components",
+        "hypothesis": "Hypotheses",
+        "outcome": "Selected Root Cause",
     }
     columns = {"evidence": 30, "component": 300, "hypothesis": 570, "outcome": 840}
-    node_width, node_height, row_gap = 220, 94, 20
+    node_width, node_height, row_gap = 220, 108, 24
     grouped = {
         kind: [item for item in nodes if isinstance(item, dict) and item.get("kind") == kind]
         for kind in kinds
@@ -44,12 +46,16 @@ def export_causal_graph_png(
     }
     other_evidence = [node for node in grouped["evidence"] if str(node.get("id") or "") not in linked_ids]
     grouped["evidence"] = [node for node in grouped["evidence"] if str(node.get("id") or "") in linked_ids]
+    outcome = grouped["outcome"][0] if grouped["outcome"] else None
+    summary_height = 108 if outcome else 0
+    node_top = summary_height + 45
     rows = max(1, *(len(items) for items in grouped.values()))
-    other_start = 45 + rows * (node_height + row_gap) + 50
+    other_start = node_top + rows * (node_height + row_gap) + 35
+    other_card_top = other_start + 48
     width, height = 1090, max(
-        190,
-        other_start + math.ceil(len(other_evidence) / 4) * (node_height + row_gap)
-        if other_evidence else 70 + rows * (node_height + row_gap),
+        190 + summary_height,
+        other_card_top + math.ceil(len(other_evidence) / 4) * (node_height + row_gap) + 18
+        if other_evidence else node_top + rows * (node_height + row_gap) + 10,
     )
     # Keep large batches within a practical raster size. The UI also offers SVG.
     scale = min(scale, max(1, int(math.sqrt(30_000_000 / (width * height)))))
@@ -63,25 +69,46 @@ def export_causal_graph_png(
     def point(value: int) -> int:
         return int(value * scale)
 
+    if outcome:
+        component = str(outcome.get("component") or "Component not determined")
+        reason = str(outcome.get("reason") or "Cause not determined")
+        confidence = _format_confidence(outcome.get("confidence"))
+        occurrence = _format_timestamp(outcome.get("timestamp"), timezone_offset_minutes)
+        draw.rounded_rectangle(
+            (point(18), point(10), point(width - 18), point(94)),
+            radius=point(5), fill="#fdf7f6", outline="#c89490", width=point(1),
+        )
+        draw.text((point(30), point(20)), "Selected Root Cause", fill="#9c3933", font=title_font)
+        draw.text((point(30), point(44)), _fit_lines(draw, component, node_font, point(255), 1)[0], fill="#202124", font=node_font)
+        draw.text((point(310), point(44)), _fit_lines(draw, reason, node_font, point(410), 1)[0], fill="#202124", font=node_font)
+        draw.text((point(765), point(43)), occurrence, fill="#202124", font=meta_font)
+        draw.text((point(765), point(64)), confidence, fill="#687076", font=meta_font)
+
     for kind in kinds:
         draw.text(
-            (point(columns[kind]), point(18)),
-            f"{labels[kind]} · {len(grouped[kind]) + (len(other_evidence) if kind == 'evidence' else 0)}",
+            (point(columns[kind]), point(summary_height + 18)),
+            f"{labels[kind]} · {len(grouped[kind])}",
             fill="#767d82",
             font=title_font,
         )
         for index, node in enumerate(grouped[kind]):
             node_id = str(node.get("id") or "")
-            positions[node_id] = (columns[kind], 45 + index * (node_height + row_gap), node)
+            positions[node_id] = (columns[kind], node_top + index * (node_height + row_gap), node)
 
     if other_evidence:
-        draw.text((point(columns["evidence"]), point(other_start - 29)),
-                  f"OTHER FINDINGS · {len(other_evidence)}", fill="#767d82", font=title_font)
+        draw.rounded_rectangle(
+            (point(18), point(other_start), point(width - 18), point(height - 12)),
+            radius=point(5), fill="#f5f7f7", outline="#cbd1d4", width=point(1),
+        )
+        draw.text((point(30), point(other_start + 10)),
+                  f"Other findings · {len(other_evidence)}", fill="#49565c", font=title_font)
+        draw.text((point(30), point(other_start + 27)),
+                  "No graph relation shown for these observations.", fill="#687076", font=meta_font)
         for index, node in enumerate(other_evidence):
             node_id = str(node.get("id") or "")
             positions[node_id] = (
                 columns[kinds[index % 4]],
-                other_start + (index // 4) * (node_height + row_gap),
+                other_card_top + (index // 4) * (node_height + row_gap),
                 node,
             )
 
@@ -123,8 +150,11 @@ def export_causal_graph_png(
             outline="#b4241b" if root else strokes.get(kind, "#cdd1d4"),
             width=point(2 if root or kind == "outcome" else 1),
         )
-        label = str(node.get("label") or "")
-        lines = _fit_lines(draw, label, node_font, point(node_width - 20), 3)
+        label = (
+            " · ".join(str(node.get(key) or "") for key in ("component", "reason") if node.get(key))
+            if kind == "outcome" else str(node.get("label") or "")
+        ) or str(node.get("label") or "")
+        lines = _fit_lines(draw, label, node_font, point(node_width - 20), 2 if kind == "outcome" else 3)
         for line_index, line in enumerate(lines):
             draw.text(
                 (point(x + 10), point(y + 10 + line_index * 18)),
@@ -132,18 +162,42 @@ def export_causal_graph_png(
                 fill="#202124",
                 font=node_font,
             )
-        meta = str(node.get("source_agent") or node.get("reason") or node.get("component") or "")
-        draw.text(
-            (point(x + 10), point(y + 74)),
-            _fit_lines(draw, meta, meta_font, point(node_width - 20), 1)[0],
-            fill="#687076",
-            font=meta_font,
-        )
+        if kind == "outcome":
+            draw.text((point(x + 10), point(y + 72)), _format_confidence(node.get("confidence")), fill="#687076", font=meta_font)
+            draw.text((point(x + 10), point(y + 89)), _format_timestamp(node.get("timestamp"), timezone_offset_minutes), fill="#687076", font=meta_font)
+        else:
+            meta = str(node.get("source_agent") or node.get("reason") or node.get("component") or "")
+            draw.text(
+                (point(x + 10), point(y + 87)),
+                _fit_lines(draw, meta, meta_font, point(node_width - 20), 1)[0],
+                fill="#687076",
+                font=meta_font,
+            )
 
     destination = Path(output_path).expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     image.save(destination, format="PNG", optimize=True)
     return destination
+
+
+def _format_confidence(value: object) -> str:
+    try:
+        return f"{round(float(value) * 100)}% confidence"
+    except (TypeError, ValueError):
+        return "Confidence not determined"
+
+
+def _format_timestamp(value: object, timezone_offset_minutes: int = 0) -> str:
+    try:
+        timestamp = float(value)
+        if timestamp <= 0:
+            return "Time not determined"
+        offset = int(timezone_offset_minutes)
+        local_time = datetime.fromtimestamp(timestamp, timezone.utc) + timedelta(minutes=offset)
+        zone = "UTC" if offset == 0 else f"UTC{'+' if offset > 0 else '-'}{abs(offset) // 60:02d}:{abs(offset) % 60:02d}"
+        return f"{local_time:%Y-%m-%d %H:%M:%S} {zone}"
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "Time not determined"
 
 
 def _font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:

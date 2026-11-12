@@ -31,6 +31,10 @@ def test_ui_index_exposes_assessment_workspace() -> None:
     assert 'id="view-graph"' in response.text
     assert 'id="causalGraphOutput"' in response.text
     assert 'id="graphIncidentSelect"' in response.text
+    assert 'outcome:"Selected Root Cause"' in response.text
+    assert 'class="outcome-label">Selected Root Cause' in response.text
+    assert 'class="graph-other-section"' in response.text
+    assert 'batch-ui-${timestamp}' in response.text
     assert 'id="downloadGraphPng"' in response.text
     assert 'id="downloadGraphSvg"' in response.text
     assert "downloadCausalGraphPng" in response.text
@@ -169,7 +173,23 @@ def test_ui_parse_stream_returns_result(tmp_path, monkeypatch) -> None:
         return original_record(**kwargs, output_root=tmp_path / "backend-output")
 
     monkeypatch.setattr(ui_server, "record_batch_incident", record_in_test_output)
+    batch_root = tmp_path / "backend-output" / "batches" / "batch-integration"
+    monkeypatch.setattr(ui_server, "batch_directory", lambda _batch_id: batch_root)
+    date_dir = tmp_path / "2021_03_04"
+    for subdir, filename, content in (
+        ("log", "log_service.csv", "timestamp,message\n1614879000,checkout timeout\n"),
+        ("trace", "trace_span.csv", "timestamp,service,duration\n1614879000,checkout,980\n"),
+        ("metric", "metric_container.csv", "timestamp,component,cpu\n1614879000,checkout,92\n"),
+    ):
+        folder = date_dir / subdir
+        folder.mkdir(parents=True)
+        (folder / filename).write_text(content, encoding="utf-8")
     client = TestClient(create_app())
+    prepared = client.post("/api/batches/batch-integration/prepare", json={
+        "dataset": "nezha",
+        "problems": [{"problem_id": "nezha-001", "source_path": str(tmp_path)}],
+    })
+    assert prepared.status_code == 200
     params = {
         "query": "On 2021-03-04 between 18:30:00 and 19:00:00 checkout timeout",
         "repo": str(tmp_path),
@@ -193,9 +213,9 @@ def test_ui_parse_stream_returns_result(tmp_path, monkeypatch) -> None:
     assert run_start["llm_provider"] == "openai-compatible"
     assert run_start["llm_model"] == "gpt-test"
     assert run_start["max_agents"] == 2
-    assert run_start["db_url"].endswith(f"/output/memory/{run_start['run_id']}.db")
+    assert run_start["db_url"].endswith(f"/batch-integration/memory/{run_start['run_id']}.db")
     assert any(item.get("type") == "event" for item in payloads)
-    assert any(item.get("type") == "result" for item in payloads)
+    assert any(item.get("type") == "result" for item in payloads), payloads[-2:]
     parser_payload = next(item["payload"] for item in payloads if item.get("type") == "parser_result")
     assert parser_payload["dataset_profile"] == "nezha"
     assert parser_payload["timezone_offset_minutes"] == 0
@@ -209,6 +229,22 @@ def test_ui_parse_stream_returns_result(tmp_path, monkeypatch) -> None:
     assert result["batch_log"]["incident_log_url"].endswith(
         "/batch-integration/incidents/nezha-001"
     )
+    assert (batch_root / "config.json").is_file()
+    assert (batch_root / "problems.csv").is_file()
+    assert (batch_root / "results.csv").is_file()
+    batch_rows = list(csv.DictReader((batch_root / "results.csv").open(encoding="utf-8", newline="")))
+    assert len(batch_rows) == 1
+    assert batch_rows[0]["problem_id"] == "nezha-001"
+    assert batch_rows[0]["run_id"] == run_start["run_id"]
+    assert batch_rows[0]["memory_db_path"].endswith(f"/memory/{run_start['run_id']}.db")
+    assert "component_ok" in batch_rows[0]
+    assert (batch_root / "memory" / f"{run_start['run_id']}.db").is_file()
+    assert (batch_root / "json").is_dir()
+    assert (batch_root / "txt").is_dir()
+    assert result["artifacts"]["json_path"].startswith(str(batch_root / "json"))
+    assert result["artifacts"]["memory_db_path"].startswith(str(batch_root / "memory"))
+    if result["assessment_output"]["causal_graph"]["nodes"]:
+        assert (batch_root / "graphs" / "nezha-001-causal-graph.png").is_file()
 
     incident = json.loads(
         (

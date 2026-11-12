@@ -56,7 +56,22 @@ aware assess \
   --repo /path/to/repository
 ```
 
-Run a complete CSV batch with per-incident PNG causal graphs:
+Run five incidents directly from an extracted dataset, without writing a query or a problems CSV:
+
+```bash
+aware batch --dataset nezha --source data/Nezha/Nezha-v0.1 --limit 5
+aware batch --dataset openrca_bank --source data/Openrca/Bank-003 --limit 5
+```
+
+The same command accepts `openrca_market` and `openrca_telecom` with their
+extracted dataset directories. `--source` may also point to a telemetry folder
+inside the selected dataset.
+
+The CLI prints the active provider, model, reasoning and memory settings at
+startup. Each batch keeps its catalogue, configuration, results, journals,
+reports, graphs, and per-incident SQLite memory under `output/batches/<batch-id>/`.
+
+Run an existing CSV batch with per-incident PNG causal graphs:
 
 ```bash
 aware batch \
@@ -150,10 +165,11 @@ Executor sub-agent information is stored in a SQLite database:
 - table `findings`
 
 Default DB:
-- `sqlite:///output/memory/run-YYYYMMDDTHHMMSSZ-xxxxxxxx.db` (new file per run)
+- `sqlite:///output/memory/run-YYYYMMDDTHHMMSSZ-xxxxxxxx.db` for standalone runs
+- `sqlite:///output/batches/<batch-id>/memory/<run-id>.db` for CLI and UI batches
 
 You can override it with:
-- UI: `DB URL` field
+- UI: `db_url` request parameter for API callers
 - CLI: `--db-url sqlite:///...`
 
 ## Provider LLM

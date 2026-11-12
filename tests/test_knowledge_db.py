@@ -32,6 +32,13 @@ def test_default_memory_is_unique_per_run_even_with_legacy_env_url(tmp_path, mon
     assert first_url.endswith(f"/output/memory/{first_id}.db")
     assert second_url.endswith(f"/output/memory/{second_id}.db")
     assert resolve_db_url("sqlite:///output/shared.db", run_id=first_id) == "sqlite:///output/shared.db"
+    batch_memory = tmp_path / "output" / "batches" / "example" / "memory"
+    assert resolve_db_url(run_id=first_id, default_dir=batch_memory).endswith(
+        f"/output/batches/example/memory/{first_id}.db"
+    )
+    assert resolve_db_url(
+        "sqlite:///output/shared.db", run_id=first_id, default_dir=batch_memory
+    ) == "sqlite:///output/shared.db"
 
     first = SQLiteKnowledgeStore.from_url(first_url)
     second = SQLiteKnowledgeStore.from_url(second_url)

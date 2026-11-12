@@ -10,9 +10,10 @@ import threading
 import time
 import uuid
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 
 from agents.executor_agent import ExecutorAgentError, ExecutorEvent
@@ -24,29 +25,22 @@ from runtime.batch_store import (
     batch_directory,
     incident_log_path,
     record_batch_incident,
+    validate_batch_identifier,
 )
+from runtime.dataset_sources import catalogue_root
 from runtime.env import env_bool, load_env, refresh_env, resolve_max_agents
+from runtime.graph_export import export_causal_graph_png
 from runtime.knowledge_db import maybe_create_knowledge_store, new_run_id, resolve_db_url
 from runtime.output_store import persist_run_artifacts
-from runtime.nezha_dataset import build_nezha_problems, discover_nezha_root, problems_to_csv
+from runtime.nezha_dataset import (
+    NEZHA_CSV_FIELDS,
+    build_nezha_problems,
+    discover_nezha_root,
+    problems_to_csv,
+    score_diagnosis,
+)
 from runtime.openrca_dataset import build_openrca_problems, openrca_problems_to_csv
 from runtime.reporting import build_assessment_output
-
-
-def _catalogue_root(dataset: str, telemetry_path: Path) -> Path:
-    """Locate incident labels above a selected telemetry subdirectory."""
-    candidate = telemetry_path.resolve()
-    for parent in (candidate, *candidate.parents):
-        if dataset == "nezha" and (parent / "rca_data").is_dir():
-            return parent
-        if dataset in {"openrca_bank", "openrca_telecom"}:
-            expected = dataset.removeprefix("openrca_")
-            if parent.name.lower() == expected and (parent / "record.csv").is_file():
-                return parent
-        if dataset == "openrca_market" and parent.name.lower() == "market":
-            if len(list(parent.glob("cloudbed-*/record.csv"))) == 2:
-                return parent
-    return candidate
 
 
 def create_app() -> FastAPI:
@@ -55,6 +49,7 @@ def create_app() -> FastAPI:
     os.environ["AWARE_RCA_VERSION"] = "v3"
     rca_version = "v3"
     app = FastAPI(title=f"AWARE Assess UI ({rca_version.upper()})")
+    batch_results_lock = threading.Lock()
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -147,7 +142,7 @@ def create_app() -> FastAPI:
         selected_source = Path(source_path.strip()).expanduser()
         if not source_path.strip() or not selected_source.is_dir():
             raise HTTPException(status_code=400, detail="Select an existing telemetry directory.")
-        catalogue_source = _catalogue_root(dataset, selected_source)
+        catalogue_source = catalogue_root(dataset, selected_source)
         try:
             if dataset == "nezha":
                 incidents = build_nezha_problems(catalogue_source)
@@ -158,6 +153,85 @@ def create_app() -> FastAPI:
         except (OSError, ValueError, csv.Error, json.JSONDecodeError, zipfile.BadZipFile) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"dataset": dataset, "count": len(incidents), "incidents": incidents}
+
+    @app.post("/api/batches/{batch_id}/prepare")
+    def prepare_batch(batch_id: str, payload: dict[str, object] = Body(...)) -> dict[str, object]:
+        """Save the UI batch selection and runtime settings before its first incident."""
+        try:
+            root = batch_directory(batch_id)
+            raw_problems = payload.get("problems")
+            if not isinstance(raw_problems, list) or not raw_problems:
+                raise ValueError("A batch needs at least one selected incident.")
+            problems: list[dict[str, str]] = []
+            for item in raw_problems:
+                if not isinstance(item, dict):
+                    raise ValueError("Invalid incident in batch selection.")
+                validate_batch_identifier(str(item.get("problem_id") or ""), "problem_id")
+                problems.append({key: str(item.get(key) or "") for key in NEZHA_CSV_FIELDS})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        refresh_env()
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "problems.csv").write_text(problems_to_csv(problems), encoding="utf-8")
+        (root / "config.json").write_text(json.dumps({
+            "batch_id": batch_id,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "source": "ui",
+            "dataset": str(payload.get("dataset") or ""),
+            "incidents": len(problems),
+            "source_paths": sorted({item["source_path"] for item in problems if item["source_path"]}),
+            "llm_provider": resolve_llm_provider(),
+            "llm_model": resolve_llm_model(),
+            "reasoning_enabled": env_bool("AWARE_ENABLE_REASONING", True),
+            "memory_enabled": env_bool("AWARE_ENABLE_MEMORY", True),
+            "max_agents_per_incident": resolve_max_agents(),
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"batch_id": batch_id, "incidents": len(problems), "directory": str(root)}
+
+    def write_ui_batch_result(
+        *, batch_id: str, problem_id: str, run_id: str, status: str,
+        agents_created: int, artifacts: dict[str, str],
+        result_payload: dict[str, object] | None, error_message: str | None,
+    ) -> None:
+        root = batch_directory(batch_id)
+        diagnosis = (
+            ((result_payload or {}).get("assessment_output") or {}).get("root_cause_synthesis") or {}
+        ).get("final_diagnosis") or {}
+        with batch_results_lock:
+            catalogue = root / "problems.csv"
+            if catalogue.is_file():
+                with catalogue.open(encoding="utf-8", newline="") as handle:
+                    problem = next((row for row in csv.DictReader(handle) if row.get("problem_id") == problem_id), {})
+            else:
+                problem = {}
+            score = score_diagnosis(diagnosis, problem)
+            row = {
+                **problem, **score,
+                "problem_id": problem_id, "run_id": run_id, "status": status,
+                "agents_created": agents_created,
+                "success": score["success"] if status == "success" else False,
+                "predicted_component": diagnosis.get("root_cause_component", ""),
+                "predicted_reason": diagnosis.get("root_cause_reason", ""),
+                "predicted_time": diagnosis.get("root_cause_time", ""),
+                "confidence": diagnosis.get("confidence", ""),
+                "artifact_json_path": artifacts.get("json_path", ""),
+                "artifact_text_path": artifacts.get("txt_path", ""),
+                "graph_png_path": artifacts.get("graph_png_path", ""),
+                "memory_db_path": artifacts.get("memory_db_path", ""),
+                "batch_incident_json_path": str(root / "incidents" / f"{problem_id}.json"),
+                "batch_incident_log_path": str(root / "incidents" / f"{problem_id}.log"),
+                "error": error_message or "",
+            }
+            result_path = root / "results.csv"
+            fieldnames = list(row)
+            existing: list[dict[str, str]] = []
+            if result_path.is_file():
+                with result_path.open(encoding="utf-8", newline="") as handle:
+                    existing = [item for item in csv.DictReader(handle) if item.get("problem_id") != problem_id]
+            with result_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows([*existing, row])
 
     @app.get("/api/batches/{batch_id}")
     def batch_manifest(batch_id: str) -> FileResponse:
@@ -219,7 +293,27 @@ def create_app() -> FastAPI:
         event_lock = threading.Lock()
         enable_reasoning = env_bool("AWARE_ENABLE_REASONING", True)
         enable_memory = env_bool("AWARE_ENABLE_MEMORY", True)
-        resolved_db_url = resolve_db_url(db_url, run_id=run_id)
+        batch_root = batch_directory(batch_id) if batch_id and problem_id else None
+        artifact_root = batch_root or Path("output")
+        resolved_db_url = resolve_db_url(
+            db_url,
+            run_id=run_id,
+            default_dir=batch_root / "memory" if batch_root else None,
+        )
+        if batch_root is not None:
+            batch_root.mkdir(parents=True, exist_ok=True)
+            config_path = batch_root / "config.json"
+            if not config_path.exists():
+                config_path.write_text(json.dumps({
+                    "batch_id": batch_id,
+                    "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "source": "ui",
+                    "llm_provider": resolved_provider,
+                    "llm_model": resolved_model,
+                    "reasoning_enabled": enable_reasoning,
+                    "memory_enabled": enable_memory,
+                    "max_agents_per_incident": resolved_max_agents,
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
         knowledge_store = maybe_create_knowledge_store(resolved_db_url) if enable_memory else None
         if knowledge_store is not None:
             knowledge_store.start_run(
@@ -321,6 +415,16 @@ def create_app() -> FastAPI:
                 status=status,
                 agents_created=agents_created,
                 events=frozen_events,
+                artifacts=artifacts,
+                result_payload=result_payload,
+                error_message=error_message,
+            )
+            write_ui_batch_result(
+                batch_id=batch_id,
+                problem_id=problem_id,
+                run_id=run_id,
+                status=status,
+                agents_created=agents_created,
                 artifacts=artifacts,
                 result_payload=result_payload,
                 error_message=error_message,
@@ -442,7 +546,10 @@ def create_app() -> FastAPI:
                         events=frozen_events,
                         result_payload=result_payload,
                         error_message=None,
+                        output_root=artifact_root,
                     )
+                    if knowledge_store is not None and batch_root is not None:
+                        artifacts["memory_db_path"] = str(knowledge_store.db_path)
                     result_payload["artifacts"] = artifacts
                     push_event(
                         "System",
@@ -487,6 +594,18 @@ def create_app() -> FastAPI:
                         "agents_created": len(executor_result.agents_instantiated),
                     },
                 }
+                graph_png_path = ""
+                graph = assessment_output.get("causal_graph")
+                if batch_root is not None and isinstance(graph, dict) and graph.get("nodes"):
+                    try:
+                        graph_png_path = str(export_causal_graph_png(
+                            graph,
+                            batch_root / "graphs" / f"{problem_id}-causal-graph.png",
+                            timezone_offset_minutes=timezone_offset_minutes,
+                        ))
+                        result_payload["graph_png_path"] = graph_png_path
+                    except (OSError, ValueError) as exc:
+                        push_event("System", "UI", "graph_export_warning", f"Graph PNG export failed: {exc}")
                 with event_lock:
                     frozen_events = list(event_history)
                 artifacts = persist_run_artifacts(
@@ -500,7 +619,12 @@ def create_app() -> FastAPI:
                     events=frozen_events,
                     result_payload=result_payload,
                     error_message=None,
+                    output_root=artifact_root,
                 )
+                if knowledge_store is not None and batch_root is not None:
+                    artifacts["memory_db_path"] = str(knowledge_store.db_path)
+                if graph_png_path:
+                    artifacts["graph_png_path"] = graph_png_path
                 result_payload["artifacts"] = artifacts
                 push_event(
                     "System",
@@ -540,7 +664,10 @@ def create_app() -> FastAPI:
                     events=frozen_events,
                     result_payload=None,
                     error_message=str(exc),
+                    output_root=artifact_root,
                 )
+                if knowledge_store is not None and batch_root is not None:
+                    artifacts["memory_db_path"] = str(knowledge_store.db_path)
                 push_event(
                     "System",
                     "UI",
@@ -576,7 +703,10 @@ def create_app() -> FastAPI:
                     events=frozen_events,
                     result_payload=None,
                     error_message=f"Unexpected error: {exc}",
+                    output_root=artifact_root,
                 )
+                if knowledge_store is not None and batch_root is not None:
+                    artifacts["memory_db_path"] = str(knowledge_store.db_path)
                 push_event(
                     "System",
                     "UI",

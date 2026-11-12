@@ -44,7 +44,7 @@ hidden in the UI.
 - **Assessment summary** surfaces the component, reason, occurrence time, and confidence.
 - **Live analysis** shows streamed events and the latest state of each agent for both single incidents and batches.
 - **Findings** presents evidence and anomalies as readable cards.
-- **Causal graph** shows the selected component, cause, time, and confidence above the diagram and inside the outcome node when a diagnosis is available. Evidence, components, hypotheses, and the outcome are grouped in related rows. Select a node by mouse or keyboard to highlight its direct relations and read its full label and provenance. The graph fits the available width on desktop; small screens keep readable text with horizontal scrolling. `Export SVG` saves a scalable vector image. `Export PNG` saves the complete graph at up to 4× resolution, capped at 24 megapixels, with a white background, regardless of the current zoom or selection.
+- **Causal graph** shows the selected component, cause, time, and confidence above the diagram and inside the outcome node when a diagnosis is available. Evidence, components, hypotheses, and the outcome are grouped in related rows. Unlinked observations appear in a separate, shaded **Other findings** section below the causal chain; their horizontal position does not imply a relation to a component or hypothesis. Select a node by mouse or keyboard to highlight its direct relations and read its full label and provenance. The graph fits the available width on desktop; small screens keep readable text with horizontal scrolling. `Export SVG` saves a scalable vector image. `Export PNG` saves the complete graph at up to 4× resolution, capped at 24 megapixels, with a white background, regardless of the current zoom or selection.
 - **Technical data** keeps the BuildSpec, scope, synthesis, and final JSON available for inspection.
 - Run metrics show elapsed time, event count, finding count, the exact number of ephemeral agents created, and execution state.
 
@@ -75,15 +75,21 @@ Problems run sequentially. Once the backend prepares the incidents, the full que
 
 If execution fails, the incident row shows `ERROR` and the error message. The live event feed remains available during a batch, so a run that is still working is distinguishable from one that failed to start. The batch control is labelled `Stop batch`; it stops the browser queue while an assessment already started on the server may continue.
 
-Every browser batch receives a unique batch ID. The backend persists a batch manifest and complete per-incident journals even if the browser connection closes:
+Every browser batch receives a UTC timestamped ID such as `batch-ui-20261112T143015Z-a1b2c3`. Before analysis, the backend saves the selected incidents and runtime configuration. Each incident then writes its memory, reports, graph, result row, and complete journals inside that batch directory, even if the browser connection closes:
 
 ```text
-output/batches/<batch_id>/manifest.json
-output/batches/<batch_id>/incidents/<problem_id>.json
-output/batches/<batch_id>/incidents/<problem_id>.log
+output/batches/<batch_id>/
+├── config.json
+├── problems.csv
+├── results.csv
+├── manifest.json
+├── incidents/<problem_id>.json and .log
+├── json/ and txt/
+├── graphs/<problem_id>-causal-graph.png
+└── memory/<run_id>.db
 ```
 
-The JSON journal contains the run ID, status, exact agent count, every emitted runtime event, artifact paths, error details, the causal graph when produced, and the complete result payload. The batch table exposes `JSON` and `TXT` links per incident, while `Backend batch log` opens the manifest for the whole batch.
+The graph file is written when a causal graph exists, and the SQLite file when memory is enabled. An explicit database URL can place memory outside the batch directory. The JSON journal contains the run ID, status, exact agent count, every emitted runtime event, artifact paths, error details, the causal graph when produced, and the complete result payload. The batch table exposes `JSON` and `TXT` links per incident, while `Backend batch log` opens the manifest for the whole batch.
 
 Each prepared incident contains:
 
@@ -115,6 +121,8 @@ The root-cause reason list in executor knowledge is a non-exhaustive candidate v
 The three OpenRCA datasets use local datetimes in `UTC+08:00`. Their `record.csv` timestamps are converted consistently with that offset; do not select UTC for these catalogues.
 
 Select the desired OpenRCA dataset, `Dataset batch`, and its telemetry directory. The backend prepares the catalogue automatically and populates the incident queue. Each catalogue contains one simple full-RCA incident per ground-truth record:
+
+The CLI uses the same dataset preparation with `aware batch --dataset openrca_bank --source /path/to/extracted/Bank-003 --limit 5` (or `openrca_market` / `openrca_telecom`).
 
 | Dataset | Problems | Systems |
 | --- | ---: | --- |

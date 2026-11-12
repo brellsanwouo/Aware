@@ -65,7 +65,8 @@ sqlite:///output/memory/run-YYYYMMDDTHHMMSSZ-xxxxxxxx.db
 ```
 
 The timestamp is UTC and the suffix prevents collisions when runs start in the
-same second. Batch incidents each receive a separate database. The generated
+same second. CLI batch incidents each receive a separate database under
+`output/batches/<batch-id>/memory/`. The generated
 URL is included in the run's event stream and artifacts. A previously saved
 browser DB URL is no longer restored automatically.
 

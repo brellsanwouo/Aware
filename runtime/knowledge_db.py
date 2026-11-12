@@ -296,14 +296,20 @@ def new_run_id() -> str:
     return f"run-{timestamp}-{uuid.uuid4().hex[:8]}"
 
 
-def resolve_db_url(explicit_db_url: str | None = None, *, run_id: str | None = None) -> str:
+def resolve_db_url(
+    explicit_db_url: str | None = None,
+    *,
+    run_id: str | None = None,
+    default_dir: str | Path | None = None,
+) -> str:
     """Give each run its own SQLite file unless a URL was explicitly supplied."""
     if explicit_db_url and explicit_db_url.strip():
         return explicit_db_url.strip()
     selected_run_id = run_id or new_run_id()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", selected_run_id):
         raise ValueError(f"Invalid run ID for SQLite filename: {selected_run_id!r}")
-    default_path = (Path.cwd() / "output" / "memory" / f"{selected_run_id}.db").resolve()
+    memory_dir = Path(default_dir) if default_dir is not None else Path.cwd() / "output" / "memory"
+    default_path = (memory_dir / f"{selected_run_id}.db").expanduser().resolve()
     return f"sqlite:///{default_path}"
 
 

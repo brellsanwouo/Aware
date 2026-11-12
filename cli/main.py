@@ -19,10 +19,12 @@ from llm.factory import create_llm_client, resolve_llm_model, resolve_llm_provid
 from aware_models.buildspec import BuildSpec
 from runtime.agent_factory import get_executor_agent, get_parser_agent
 from runtime.batch_store import record_batch_incident, validate_batch_identifier
+from runtime.dataset_sources import catalogue_root
 from runtime.env import env_bool, load_env, resolve_max_agents
 from runtime.graph_export import export_causal_graph_png
 from runtime.knowledge_db import maybe_create_knowledge_store, new_run_id, resolve_db_url
-from runtime.nezha_dataset import NEZHA_CSV_FIELDS, score_diagnosis
+from runtime.nezha_dataset import NEZHA_CSV_FIELDS, build_nezha_problems, problems_to_csv, score_diagnosis
+from runtime.openrca_dataset import build_openrca_problems
 from runtime.output_store import persist_run_artifacts
 from runtime.reporting import build_assessment_output
 
@@ -567,11 +569,17 @@ def assess_end_to_end(
 @app.command("batch")
 def assess_batch(
     problems_csv: Annotated[
-        Path, typer.Option("--problems-csv", help="AWARE problems CSV to execute.")
-    ],
+        Path | None, typer.Option("--problems-csv", help="Existing AWARE problems CSV to execute.")
+    ] = None,
+    dataset: Annotated[
+        str | None, typer.Option(
+            "--dataset",
+            help="Prepare incidents directly from nezha, openrca_bank, openrca_market, or openrca_telecom.",
+        )
+    ] = None,
     repo: Annotated[
         Path | None,
-        typer.Option("--repo", help="Fallback telemetry repository when source_path is blank."),
+        typer.Option("--repo", "--source", help="Dataset directory, or fallback telemetry directory for a CSV."),
     ] = None,
     results_csv: Annotated[
         Path | None, typer.Option("--results-csv", help="Batch score CSV destination.")
@@ -601,26 +609,73 @@ def assess_batch(
         bool, typer.Option("--json", help="Print the final batch summary as JSON.")
     ] = False,
 ) -> None:
-    """Run an AWARE CSV batch with per-incident logs, scores, and V3 graph PNGs."""
-    if not problems_csv.is_file():
-        typer.secho(f"Problems CSV does not exist: {problems_csv}", fg=typer.colors.RED, err=True)
+    """Run a dataset or CSV batch with per-incident logs, scores, and graphs."""
+    selected_dataset = dataset.strip().lower().replace("-", "_") if dataset else None
+    if bool(selected_dataset) == bool(problems_csv):
+        typer.secho("Provide exactly one of --dataset or --problems-csv.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-    if repo is not None and not repo.exists():
-        typer.secho(f"Fallback repository does not exist: {repo}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+    supported_datasets = {"nezha", "openrca_bank", "openrca_market", "openrca_telecom"}
+    if selected_dataset:
+        if selected_dataset not in supported_datasets:
+            typer.secho(
+                f"Unsupported dataset: {dataset}. Supported: {', '.join(sorted(supported_datasets))}.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if repo is None or not repo.is_dir():
+            typer.secho(
+                f"--dataset {selected_dataset} requires --source pointing to an extracted dataset directory.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        try:
+            selected_source = catalogue_root(selected_dataset, repo)
+            problems = (
+                build_nezha_problems(selected_source)
+                if selected_dataset == "nezha"
+                else build_openrca_problems(selected_source, selected_dataset.removeprefix("openrca_"))
+            )
+        except (OSError, ValueError, csv.Error, json.JSONDecodeError, KeyError) as exc:
+            typer.secho(f"Unable to prepare {selected_dataset} incidents: {exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1) from exc
+    else:
+        assert problems_csv is not None
+        if not problems_csv.is_file():
+            typer.secho(f"Problems CSV does not exist: {problems_csv}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        if repo is not None and not repo.exists():
+            typer.secho(f"Fallback repository does not exist: {repo}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        problems = _read_problems_csv(problems_csv)
     version = _set_v3_runtime()
     resolved_batch_id = validate_batch_identifier(
         batch_id or f"batch-cli-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}",
         "batch_id",
     )
-    problems = _read_problems_csv(problems_csv)
     if limit is not None:
         problems = problems[:limit]
     if not problems:
-        typer.secho("The problems CSV contains no executable incidents.", fg=typer.colors.RED, err=True)
+        typer.secho("No executable incidents found.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     batch_root = (Path.cwd() / "output" / "batches" / resolved_batch_id).resolve()
+    input_problems_csv = problems_csv
+    try:
+        problems = [
+            {
+                **problem,
+                "source_path": str(
+                    _resolve_problem_source(problem, input_problems_csv or batch_root / "problems.csv", repo)
+                ),
+            }
+            for problem in problems
+        ]
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    batch_problems_csv = batch_root / "problems.csv"
     resolved_results_csv = (results_csv or (batch_root / "results.csv")).expanduser().resolve()
     resolved_graph_dir = (graph_dir or (batch_root / "graphs")).expanduser().resolve()
     resolved_max_agents = resolve_max_agents(max_agents)
@@ -638,6 +693,34 @@ def assess_batch(
     except (LLMError, ValueError) as exc:
         typer.secho(f"LLM configuration error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
+    batch_root.mkdir(parents=True, exist_ok=True)
+    batch_problems_csv.write_text(problems_to_csv(problems), encoding="utf-8")
+    config_path = batch_root / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "batch_id": resolved_batch_id,
+                "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                "rca_version": version,
+                "dataset": selected_dataset or "csv",
+                "source_path": str(repo.expanduser().resolve()) if repo else None,
+                "input_problems_csv": str(input_problems_csv.expanduser().resolve()) if input_problems_csv else None,
+                "incidents": len(problems),
+                "llm_provider": resolved_provider,
+                "llm_model": resolved_model,
+                "reasoning_enabled": enable_reasoning,
+                "memory_enabled": enable_memory,
+                "max_agents_per_incident": resolved_max_agents,
+                "max_parser_attempts": resolved_attempts,
+                "db_url_override": db_url,
+                "results_csv": str(resolved_results_csv),
+                "graph_dir": str(resolved_graph_dir),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     parser_agent = get_parser_agent(llm_client=llm_client, max_attempts=resolved_attempts)
     executor_agent = get_executor_agent(llm_client=llm_client)
     results: list[dict[str, object]] = []
@@ -647,12 +730,18 @@ def assess_batch(
             f"Starting {version.upper()} batch {resolved_batch_id}: "
             f"incidents={len(problems)}, max_agents={resolved_max_agents}"
         )
+        typer.echo(f"Provider: {resolved_provider} | Model: {resolved_model or 'not configured'}")
+        typer.echo(
+            f"Reasoning: {'Enabled' if enable_reasoning else 'Disabled'} | "
+            f"Memory: {'Enabled' if enable_memory else 'Disabled'}"
+        )
+        typer.echo(f"Batch directory: {batch_root}")
     for index, problem in enumerate(problems, start=1):
         problem_id = validate_batch_identifier(str(problem["problem_id"]), "problem_id")
         run_id = new_run_id()
-        resolved_db_url = resolve_db_url(db_url, run_id=run_id)
+        resolved_db_url = resolve_db_url(db_url, run_id=run_id, default_dir=batch_root / "memory")
         knowledge_store = maybe_create_knowledge_store(resolved_db_url) if enable_memory else None
-        source_path = _resolve_problem_source(problem, problems_csv, repo)
+        source_path = Path(problem["source_path"])
         query = _problem_query(problem)
         profile = _problem_profile(problem_id)
         offset = int(str(problem.get("timezone_offset_minutes") or 0))
@@ -732,7 +821,10 @@ def assess_batch(
                 events=events,
                 result_payload=combined_payload,
                 error_message=None,
+                output_root=batch_root,
             )
+            if knowledge_store is not None:
+                artifacts["memory_db_path"] = str(knowledge_store.db_path)
             combined_payload["artifacts"] = artifacts
             reported_graph = assessment_output.get("causal_graph", {})
             if isinstance(reported_graph, dict) and reported_graph.get("nodes"):
@@ -740,6 +832,7 @@ def assess_batch(
                     export_causal_graph_png(
                         reported_graph,
                         resolved_graph_dir / f"{problem_id}-causal-graph.png",
+                        timezone_offset_minutes=offset,
                     )
                 )
                 artifacts["graph_png_path"] = graph_path
@@ -766,7 +859,10 @@ def assess_batch(
                 events=events,
                 result_payload=None,
                 error_message=error_message,
+                output_root=batch_root,
             )
+            if knowledge_store is not None:
+                artifacts["memory_db_path"] = str(knowledge_store.db_path)
 
         scores = score_diagnosis(diagnosis, problem)
         result_row: dict[str, object] = {
@@ -781,6 +877,7 @@ def assess_batch(
             "graph_png_path": graph_path,
             "artifact_json_path": artifacts.get("json_path", ""),
             "artifact_text_path": artifacts.get("txt_path", ""),
+            "memory_db_path": artifacts.get("memory_db_path", ""),
             "error": error_message,
         }
         if combined_payload is not None:
@@ -809,12 +906,22 @@ def assess_batch(
     passed = sum(1 for result in results if result.get("success"))
     summary = {
         "batch_id": resolved_batch_id,
+        "batch_directory": str(batch_root),
+        "problems_csv": str(batch_problems_csv),
+        "config_json": str(config_path),
         "rca_version": version,
+        "llm_provider": resolved_provider,
+        "llm_model": resolved_model,
+        "reasoning_enabled": enable_reasoning,
+        "memory_enabled": enable_memory,
+        "max_agents_per_incident": resolved_max_agents,
         "incidents": len(results),
         "passed": passed,
         "success_rate": round(passed / len(results), 4) if results else 0.0,
         "results_csv": str(resolved_results_csv),
         "graph_dir": str(resolved_graph_dir),
+        "incident_logs_dir": str(batch_root / "incidents"),
+        "memory_dir": str(batch_root / "memory") if enable_memory and not db_url else None,
         "batch_manifest": str(batch_root / "manifest.json"),
     }
     if json_output:
@@ -824,6 +931,10 @@ def assess_batch(
             f"Batch complete: {passed}/{len(results)} passed "
             f"({summary['success_rate']:.1%}). Results: {resolved_results_csv}"
         )
+        typer.echo(f"Batch files: {batch_root} (config.json, problems.csv, manifest.json, incidents/, json/, txt/)")
+        typer.echo(f"Graphs: {resolved_graph_dir}")
+        if enable_memory:
+            typer.echo(f"Memory: {db_url or batch_root / 'memory'}")
 
 
 @app.command("ui")
@@ -957,6 +1068,7 @@ _BATCH_RESULT_FIELDS = (
     "graph_png_path",
     "artifact_json_path",
     "artifact_text_path",
+    "memory_db_path",
     "batch_incident_json_path",
     "batch_incident_log_path",
     "error",

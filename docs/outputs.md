@@ -4,7 +4,7 @@ Each successful or failed run can produce local artifacts and optional SQLite re
 
 ## Artifact Files
 
-Runs are saved automatically under:
+Standalone runs are saved automatically under:
 
 ```text
 output/json/<timestamp>_<run_id>.json
@@ -12,6 +12,27 @@ output/txt/<timestamp>_<run_id>.txt
 ```
 
 The JSON artifact contains structured parser, executor, and assessment data. The text artifact is a human-readable report.
+
+## Batch Results
+
+`aware batch` prints its UTC timestamped batch ID and output directory. Browser
+batches also use a timestamped ID. By default, both interfaces group batch files
+under `output/batches/<batch-id>/`:
+
+- `results.csv`: one row per incident, with the predicted cause, score, agent count, and artifact paths.
+- `config.json`: provider, model, reasoning and memory flags, agent limit, and input locations; no API keys.
+- `problems.csv`: snapshot of the incidents selected for this batch.
+- `manifest.json`: incident IDs, run IDs, statuses, and journal paths.
+- `incidents/<problem-id>.json` and `.log`: complete event journals and results.
+- `json/` and `txt/`: per-incident structured and readable reports.
+- `graphs/<problem-id>-causal-graph.png`: graph image when a graph was produced.
+- `memory/<run-id>.db`: one SQLite database per incident when memory is enabled.
+
+The `results.csv` file includes the path to each incident's memory database. The
+CLI PNG and UI graph identify the selected component, cause, occurrence time
+in the incident's configured timezone, and confidence. Observations without a displayed graph relation are
+grouped in a separate **Other findings** area beneath the causal chain.
+Explicit output path overrides may place selected files outside this directory.
 
 ## Assessment Sections
 
@@ -30,11 +51,14 @@ The final assessment output can include:
 
 When memory is enabled, Aware writes runtime information to SQLite.
 
-Default URL:
+Default URL for a standalone run:
 
 ```text
 sqlite:///output/memory/run-YYYYMMDDTHHMMSSZ-xxxxxxxx.db
 ```
+
+For either CLI or browser batches, the default is
+`sqlite:///output/batches/<batch-id>/memory/<run-id>.db`.
 
 Tables:
 
