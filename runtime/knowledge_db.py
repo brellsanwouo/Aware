@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-import os
+import re
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -289,15 +290,20 @@ class SQLiteKnowledgeStore:
             )
 
 
-def resolve_db_url(explicit_db_url: str | None = None) -> str:
-    """Resolve DB URL from explicit value or env, with safe SQLite default."""
+def new_run_id() -> str:
+    """Create a readable, collision-resistant UTC launch identifier."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"run-{timestamp}-{uuid.uuid4().hex[:8]}"
+
+
+def resolve_db_url(explicit_db_url: str | None = None, *, run_id: str | None = None) -> str:
+    """Give each run its own SQLite file unless a URL was explicitly supplied."""
     if explicit_db_url and explicit_db_url.strip():
         return explicit_db_url.strip()
-    env_url = os.getenv("ASSESS_DB_URL", "").strip()
-    if env_url:
-        return env_url
-    filename = "assess_v3.db"
-    default_path = (Path.cwd() / "output" / filename).resolve()
+    selected_run_id = run_id or new_run_id()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", selected_run_id):
+        raise ValueError(f"Invalid run ID for SQLite filename: {selected_run_id!r}")
+    default_path = (Path.cwd() / "output" / "memory" / f"{selected_run_id}.db").resolve()
     return f"sqlite:///{default_path}"
 
 

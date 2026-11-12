@@ -316,6 +316,7 @@ def test_parser_self_configures_llm_from_env_when_missing(monkeypatch: pytest.Mo
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_MODEL", "gpt-5-mini")
+    monkeypatch.setenv("AWARE_LLM_PROVIDER", "openai-compatible")
     monkeypatch.setattr(parser_module, "create_llm_client", _factory)
 
     agent = parser_module.ParserAgent(

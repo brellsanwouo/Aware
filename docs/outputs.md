@@ -33,7 +33,7 @@ When memory is enabled, Aware writes runtime information to SQLite.
 Default URL:
 
 ```text
-sqlite:///output/assess_v3.db
+sqlite:///output/memory/run-YYYYMMDDTHHMMSSZ-xxxxxxxx.db
 ```
 
 Tables:

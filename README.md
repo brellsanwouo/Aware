@@ -150,7 +150,7 @@ Executor sub-agent information is stored in a SQLite database:
 - table `findings`
 
 Default DB:
-- `sqlite:///output/assess_v3.db`
+- `sqlite:///output/memory/run-YYYYMMDDTHHMMSSZ-xxxxxxxx.db` (new file per run)
 
 You can override it with:
 - UI: `DB URL` field
@@ -158,17 +158,21 @@ You can override it with:
 
 ## Provider LLM
 
-- OpenAI uniquement (`openai-compatible`).
+- OpenAI-compatible APIs (`openai-compatible`) and Ollama Cloud (`ollama`, also accepts `ollama-cloud`).
 
 Useful `.env` variables:
 
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL` (optional, default: `https://api.openai.com/v1`)
 - `OPENAI_MODEL` (optional, default: `gpt-5-mini`)
+- `AWARE_LLM_PROVIDER=ollama` to use Ollama Cloud
+- `OLLAMA_API_KEY` and `OLLAMA_MODEL` when using Ollama Cloud
+- `OLLAMA_BASE_URL` (optional, default: `https://ollama.com/v1`)
+- `OLLAMA_TIMEOUT_SECONDS` (optional, default: `120`)
 - `PARSER_MAX_ATTEMPTS`
 - `AWARE_PARSER_KB_FILE` (optional, default: `knowledge/parser_buildspec_kb.md`)
 - `AWARE_EXECUTOR_V3_KB_FILE` (optional, default: `knowledge/executor_rca_v3_kb.md`)
-- `EXECUTOR_MAX_AGENTS` (optional: global limit for instantiated sub-agents)
+- `EXECUTOR_MAX_AGENTS` (default `5`: total Executor sub-agents allowed per incident analysis)
 - `EXECUTOR_MAX_EXPANSIONS` (optional: focused follow-ups after initial domain coverage; default `2`, maximum `4`)
 - `AWARE_ENABLE_REASONING` (`true|false`, default `true`)
   - `false`: the LLM is still used, but in fast reasoning mode (more direct prompts)

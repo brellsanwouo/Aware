@@ -8,6 +8,41 @@ from runtime import reporting as reporting_module
 from runtime.reporting import build_assessment_output
 
 
+def test_final_diagnosis_is_visible_without_false_support_edge() -> None:
+    graph = {
+        "nodes": [{"id": "hypothesis:1", "kind": "hypothesis", "component": "MG01", "reason": "memory"}],
+        "edges": [],
+        "root_node_id": "",
+    }
+    diagnosis = {
+        "root_cause_component": "Tomcat03",
+        "root_cause_reason": "memory",
+        "root_cause_time": 1614789000,
+        "confidence": "high",
+    }
+
+    result = reporting_module._graph_with_final_outcome(graph, diagnosis)
+
+    assert result["nodes"][-1]["kind"] == "outcome"
+    assert result["nodes"][-1]["component"] == "Tomcat03"
+    assert result["edges"] == []
+    assert graph["nodes"] == [{"id": "hypothesis:1", "kind": "hypothesis", "component": "MG01", "reason": "memory"}]
+
+
+def test_matching_diagnosis_links_to_existing_hypothesis() -> None:
+    graph = {
+        "nodes": [{"id": "hypothesis:1", "kind": "hypothesis", "component": "MG01", "reason": "memory"}],
+        "edges": [],
+        "root_node_id": "",
+    }
+    diagnosis = {"root_cause_component": "MG01", "root_cause_reason": "memory", "confidence": "medium"}
+
+    result = reporting_module._graph_with_final_outcome(graph, diagnosis)
+
+    assert result["root_node_id"] == "hypothesis:1"
+    assert result["edges"] == [{"source": "hypothesis:1", "target": "outcome:final-diagnosis", "relation": "supports", "confidence": 0.65}]
+
+
 def test_component_extraction_does_not_return_linking_word() -> None:
     finding = AssessFinding(
         agent="MetricsAgent",

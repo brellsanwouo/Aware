@@ -46,6 +46,49 @@ def _confidence_label(value: float | int | None) -> str:
     return "low"
 
 
+def _graph_with_final_outcome(
+    graph: dict[str, object], diagnosis: dict[str, object]
+) -> dict[str, object]:
+    """Show the reported diagnosis without inventing support from unrelated nodes."""
+    nodes = graph.get("nodes")
+    if not isinstance(nodes, list) or any(
+        isinstance(node, dict) and node.get("kind") == "outcome" for node in nodes
+    ):
+        return graph
+    component = diagnosis.get("root_cause_component")
+    reason = diagnosis.get("root_cause_reason")
+    if not component or not reason:
+        return graph
+    result = {**graph, "nodes": list(nodes), "edges": list(graph.get("edges") or [])}
+    confidence = {"low": 0.35, "medium": 0.65, "high": 0.9}.get(
+        str(diagnosis.get("confidence") or "").lower(), 0.5
+    )
+    result["nodes"].append({
+        "id": "outcome:final-diagnosis",
+        "kind": "outcome",
+        "label": f"{component} · {reason}",
+        "component": str(component),
+        "reason": str(reason),
+        "timestamp": diagnosis.get("root_cause_time") or 0,
+        "confidence": confidence,
+        "source_agent": "Final diagnosis",
+        "source": "assessment_output.root_cause_synthesis",
+    })
+    match = next((
+        node for node in nodes
+        if isinstance(node, dict) and node.get("kind") == "hypothesis"
+        and str(node.get("component") or "").casefold() == str(component).casefold()
+        and str(node.get("reason") or "").casefold() == str(reason).casefold()
+    ), None)
+    if match:
+        result["edges"].append({
+            "source": match["id"], "target": "outcome:final-diagnosis",
+            "relation": "supports", "confidence": confidence,
+        })
+        result["root_node_id"] = match["id"]
+    return result
+
+
 def _iter_texts(finding: AssessFinding) -> Iterable[str]:
     yield finding.summary
     for item in finding.evidence:
@@ -660,10 +703,11 @@ def build_assessment_output(buildspec: BuildSpec, executor_result: ExecutorRunRe
     return {
         "summary": executor_result.summary,
         "execution_mode": executor_result.execution_mode,
-        "causal_graph": (
+        "causal_graph": _graph_with_final_outcome(
             executor_result.causal_graph.model_dump(mode="json")
             if executor_result.causal_graph is not None
-            else {"nodes": [], "edges": [], "root_node_id": ""}
+            else {"nodes": [], "edges": [], "root_node_id": ""},
+            root_cause_synthesis["final_diagnosis"],
         ),
         "buildspec_resolution_scope": {
             "task_type": buildspec.task_type,

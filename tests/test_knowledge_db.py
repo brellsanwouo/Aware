@@ -7,7 +7,7 @@ from pathlib import Path
 
 from agents.executor_agent import ExecutorAgent
 from aware_models.buildspec import BuildSpec
-from runtime.knowledge_db import SQLiteKnowledgeStore
+from runtime.knowledge_db import SQLiteKnowledgeStore, new_run_id, resolve_db_url
 
 
 class _DecisionStubLLM:
@@ -17,6 +17,28 @@ class _DecisionStubLLM:
 
     def complete(self, system_prompt: str, user_prompt: str, response_format: dict | None = None) -> str:
         return '{"summary":"stub","findings":[]}'
+
+
+def test_default_memory_is_unique_per_run_even_with_legacy_env_url(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ASSESS_DB_URL", "sqlite:///output/openrca.db")
+    first_id, second_id = new_run_id(), new_run_id()
+    first_url = resolve_db_url(run_id=first_id)
+    second_url = resolve_db_url(run_id=second_id)
+
+    assert first_id != second_id
+    assert first_id.startswith("run-") and "T" in first_id and "Z-" in first_id
+    assert first_url != second_url
+    assert first_url.endswith(f"/output/memory/{first_id}.db")
+    assert second_url.endswith(f"/output/memory/{second_id}.db")
+    assert resolve_db_url("sqlite:///output/shared.db", run_id=first_id) == "sqlite:///output/shared.db"
+
+    first = SQLiteKnowledgeStore.from_url(first_url)
+    second = SQLiteKnowledgeStore.from_url(second_url)
+    first.start_run(run_id=first_id, source_path="source", query="query", db_url=first_url)
+    with sqlite3.connect(second.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+    assert first.db_path.is_file() and second.db_path.is_file()
 
 
 def _seed_buildspec(tmp_path: Path) -> BuildSpec:

@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agents.base import Agent
 from llm.base import LLMClient, LLMError
-from llm.factory import create_llm_client
+from llm.factory import create_llm_client, resolve_llm_model, resolve_llm_provider
 from llm.schemas import BUILDSPEC_RESPONSE_FORMAT
 from aware_models.buildspec import BuildSpec, validate_buildspec
 from tools import time_tools
@@ -364,8 +364,8 @@ class ParserAgent(Agent):
         """Return the parser LLM client, creating it from environment when missing."""
         if self.llm_client is not None:
             return self.llm_client
-        provider = (os.getenv("AWARE_LLM_PROVIDER", "openai-compatible") or "openai-compatible").strip()
-        model = os.getenv("OPENAI_MODEL")
+        provider = resolve_llm_provider()
+        model = resolve_llm_model(provider=provider)
         try:
             self.llm_client = create_llm_client(
                 provider=provider,

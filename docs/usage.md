@@ -68,7 +68,7 @@ aware assess \
 | `--graph-dir` | Batch | V3 causal graph PNG directory. |
 | `--db-url` | Execute / Assess / Batch | SQLite database URL override. |
 | `--max-agents` | Execute / Assess / Batch | Maximum number of executor sub-agents per incident. |
-| `--llm-model` | Parser / Assess | OpenAI model override. |
+| `--llm-model` | Parser / Assess / Batch | LLM model override. |
 
 ## BuildSpec Multiple Files
 

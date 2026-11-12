@@ -35,7 +35,7 @@ def test_exports_causal_graph_as_real_png(tmp_path: Path) -> None:
     assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
     with Image.open(output) as image:
         assert image.format == "PNG"
-        assert image.width >= 2000
+        assert image.width >= 3000
 
 
 def test_batch_command_is_exposed_with_graph_options() -> None:

@@ -32,20 +32,29 @@ def test_ui_index_exposes_assessment_workspace() -> None:
     assert 'id="causalGraphOutput"' in response.text
     assert 'id="graphIncidentSelect"' in response.text
     assert 'id="downloadGraphPng"' in response.text
+    assert 'id="downloadGraphSvg"' in response.text
     assert "downloadCausalGraphPng" in response.text
+    assert "downloadCausalGraphSvg" in response.text
     assert "showIncidentGraph" in response.text
     assert "causal_graph:payload?.assessment_output?.causal_graph" in response.text
     assert 'id="versionState"' in response.text
     assert 'id="stopBtn"' in response.text
     assert 'id="datasetProfile"' in response.text
     assert 'id="timezoneOffset"' in response.text
-    assert 'id="batchCsv"' in response.text
+    assert 'id="batchPrepareHint"' in response.text
+    assert '<input id="dbUrl" type="hidden" value="">' in response.text
+    assert '<label for="dbUrl">' not in response.text
+    assert 'id="runtimeStatus" class="hidden"' in response.text
+    assert 'id="versionState" class="hidden"' in response.text
+    assert 'New database for each run' not in response.text
     assert "loadDatasetCatalogue" in response.text
-    assert "incidents loaded automatically" in response.text
-    assert "optional override" in response.text
+    assert "/api/datasets/nezha/incidents" in response.text
+    assert 'id="batchCsv"' not in response.text
+    assert 'id="downloadProblemsCsv"' not in response.text
     assert 'id="batchSuccessRate"' in response.text
     assert 'id="view-batch"' in response.text
     assert 'id="agentCount"' in response.text
+    assert 'id="maxAgentsState"' in response.text
     assert 'id="batchManifestLink"' in response.text
     assert "<th>Agents</th>" in response.text
     assert "<th>Logs</th>" in response.text
@@ -82,6 +91,16 @@ def test_ui_downloads_nezha_problem_catalogue(tmp_path) -> None:
     rows = list(csv.DictReader(io.StringIO(response.text)))
     assert len(rows) == 1
     assert rows[0]["expected_reason"] == "network_delay"
+    prepared = client.get("/api/datasets/nezha/incidents", params={"source_path": str(tmp_path)})
+    assert prepared.status_code == 200
+    assert prepared.json()["count"] == 1
+    assert prepared.json()["incidents"][0]["expected_reason"] == "network_delay"
+    nested = client.get(
+        "/api/datasets/nezha/incidents",
+        params={"source_path": str(tmp_path / "rca_data")},
+    )
+    assert nested.status_code == 200
+    assert nested.json()["incidents"][0]["source_path"] == str(tmp_path.resolve())
 
 
 def test_ui_downloads_openrca_bank_problem_catalogue(tmp_path) -> None:
@@ -110,6 +129,28 @@ def test_ui_downloads_openrca_bank_problem_catalogue(tmp_path) -> None:
     assert len(rows) == 1
     assert rows[0]["timezone_offset_minutes"] == "480"
     assert rows[0]["expected_component"] == "Mysql02"
+    prepared = client.get("/api/datasets/openrca_bank/incidents", params={"source_path": str(bank)})
+    assert prepared.status_code == 200
+    assert prepared.json()["count"] == 1
+    assert prepared.json()["incidents"][0]["expected_component"] == "Mysql02"
+    telemetry = bank / "telemetry" / "2021_03_04"
+    telemetry.mkdir(parents=True)
+    nested = client.get(
+        "/api/datasets/openrca_bank/incidents",
+        params={"source_path": str(telemetry)},
+    )
+    assert nested.status_code == 200
+    assert nested.json()["incidents"][0]["source_path"] == str(bank.resolve())
+
+
+def test_ui_batch_catalogue_rejects_missing_telemetry_directory(tmp_path) -> None:
+    client = TestClient(create_app())
+    response = client.get(
+        "/api/datasets/nezha/incidents",
+        params={"source_path": str(tmp_path / "missing")},
+    )
+    assert response.status_code == 400
+    assert "existing telemetry directory" in response.json()["detail"]
 
 
 def test_ui_parse_stream_returns_result(tmp_path, monkeypatch) -> None:
@@ -117,6 +158,9 @@ def test_ui_parse_stream_returns_result(tmp_path, monkeypatch) -> None:
     from agents import parser_agent as parser_module
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("AWARE_LLM_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("EXECUTOR_MAX_AGENTS", "2")
     monkeypatch.setattr(ui_server, "create_llm_client", lambda **_: MockLLMClient(invalid_attempts=1))
     monkeypatch.setattr(parser_module, "create_llm_client", lambda **_: MockLLMClient(invalid_attempts=1))
     original_record = ui_server.record_batch_incident
@@ -145,6 +189,11 @@ def test_ui_parse_stream_returns_result(tmp_path, monkeypatch) -> None:
     payload_lines = [line for line in buffer.splitlines() if line.startswith("data: ")]
     assert payload_lines
     payloads = [json.loads(line[6:]) for line in payload_lines]
+    run_start = next(item for item in payloads if item.get("type") == "run_start")
+    assert run_start["llm_provider"] == "openai-compatible"
+    assert run_start["llm_model"] == "gpt-test"
+    assert run_start["max_agents"] == 2
+    assert run_start["db_url"].endswith(f"/output/memory/{run_start['run_id']}.db")
     assert any(item.get("type") == "event" for item in payloads)
     assert any(item.get("type") == "result" for item in payloads)
     parser_payload = next(item["payload"] for item in payloads if item.get("type") == "parser_result")
@@ -156,6 +205,7 @@ def test_ui_parse_stream_returns_result(tmp_path, monkeypatch) -> None:
     assert result["execution"]["agents_created"] == len(
         result["executor"]["agents_instantiated"]
     )
+    assert result["execution"]["agents_created"] <= 2
     assert result["batch_log"]["incident_log_url"].endswith(
         "/batch-integration/incidents/nezha-001"
     )

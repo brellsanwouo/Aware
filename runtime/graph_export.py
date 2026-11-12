@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +15,7 @@ def export_causal_graph_png(
     graph: CausalGraph | dict[str, Any],
     output_path: str | Path,
     *,
-    scale: int = 2,
+    scale: int = 3,
 ) -> Path:
     """Render evidence→component→hypothesis→outcome as a readable PNG."""
     payload = graph.model_dump(mode="json") if isinstance(graph, CausalGraph) else graph
@@ -33,18 +32,32 @@ def export_causal_graph_png(
         "outcome": "OUTCOME",
     }
     columns = {"evidence": 30, "component": 300, "hypothesis": 570, "outcome": 840}
-    node_width, node_height, row_gap = 220, 66, 24
+    node_width, node_height, row_gap = 220, 94, 20
     grouped = {
         kind: [item for item in nodes if isinstance(item, dict) and item.get("kind") == kind]
         for kind in kinds
     }
-    rows = max((len(items) for items in grouped.values()), default=1)
-    width, height = 1090, max(190, 70 + rows * (node_height + row_gap))
+    linked_ids = {
+        str(edge.get(endpoint) or "")
+        for edge in edges if isinstance(edge, dict)
+        for endpoint in ("source", "target")
+    }
+    other_evidence = [node for node in grouped["evidence"] if str(node.get("id") or "") not in linked_ids]
+    grouped["evidence"] = [node for node in grouped["evidence"] if str(node.get("id") or "") in linked_ids]
+    rows = max(1, *(len(items) for items in grouped.values()))
+    other_start = 45 + rows * (node_height + row_gap) + 50
+    width, height = 1090, max(
+        190,
+        other_start + math.ceil(len(other_evidence) / 4) * (node_height + row_gap)
+        if other_evidence else 70 + rows * (node_height + row_gap),
+    )
+    # Keep large batches within a practical raster size. The UI also offers SVG.
+    scale = min(scale, max(1, int(math.sqrt(30_000_000 / (width * height)))))
     image = Image.new("RGB", (width * scale, height * scale), "white")
     draw = ImageDraw.Draw(image)
     title_font = _font(10 * scale, bold=True)
-    node_font = _font(11 * scale, bold=True)
-    meta_font = _font(9 * scale)
+    node_font = _font(12 * scale, bold=True)
+    meta_font = _font(10 * scale)
     positions: dict[str, tuple[int, int, dict[str, Any]]] = {}
 
     def point(value: int) -> int:
@@ -53,13 +66,24 @@ def export_causal_graph_png(
     for kind in kinds:
         draw.text(
             (point(columns[kind]), point(18)),
-            labels[kind],
+            f"{labels[kind]} · {len(grouped[kind]) + (len(other_evidence) if kind == 'evidence' else 0)}",
             fill="#767d82",
             font=title_font,
         )
         for index, node in enumerate(grouped[kind]):
             node_id = str(node.get("id") or "")
             positions[node_id] = (columns[kind], 45 + index * (node_height + row_gap), node)
+
+    if other_evidence:
+        draw.text((point(columns["evidence"]), point(other_start - 29)),
+                  f"OTHER FINDINGS · {len(other_evidence)}", fill="#767d82", font=title_font)
+        for index, node in enumerate(other_evidence):
+            node_id = str(node.get("id") or "")
+            positions[node_id] = (
+                columns[kinds[index % 4]],
+                other_start + (index // 4) * (node_height + row_gap),
+                node,
+            )
 
     for edge in edges if isinstance(edges, list) else []:
         if not isinstance(edge, dict):
@@ -100,18 +124,18 @@ def export_causal_graph_png(
             width=point(2 if root or kind == "outcome" else 1),
         )
         label = str(node.get("label") or "")
-        lines = textwrap.wrap(label, width=31)[:2] or [""]
+        lines = _fit_lines(draw, label, node_font, point(node_width - 20), 3)
         for line_index, line in enumerate(lines):
             draw.text(
-                (point(x + 10), point(y + 9 + line_index * 15)),
+                (point(x + 10), point(y + 10 + line_index * 18)),
                 line,
                 fill="#202124",
                 font=node_font,
             )
         meta = str(node.get("source_agent") or node.get("reason") or node.get("component") or "")
         draw.text(
-            (point(x + 10), point(y + 49)),
-            meta[:36],
+            (point(x + 10), point(y + 74)),
+            _fit_lines(draw, meta, meta_font, point(node_width - 20), 1)[0],
             fill="#687076",
             font=meta_font,
         )
@@ -128,6 +152,33 @@ def _font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFon
         return ImageFont.truetype(name, size=size)
     except OSError:
         return ImageFont.load_default()
+
+
+def _fit_lines(
+    draw: ImageDraw.ImageDraw,
+    value: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    max_width: int,
+    max_lines: int,
+) -> list[str]:
+    remaining = " ".join(value.split())
+    lines: list[str] = []
+    while remaining and len(lines) < max_lines:
+        end = 1
+        while end < len(remaining) and draw.textlength(remaining[: end + 1], font=font) <= max_width:
+            end += 1
+        if end < len(remaining):
+            space = remaining.rfind(" ", 0, end + 1)
+            if space > 0:
+                end = space
+        lines.append(remaining[:end].strip())
+        remaining = remaining[end:].strip()
+    if remaining and lines:
+        final = lines[-1]
+        while final and draw.textlength(final + "…", font=font) > max_width:
+            final = final[:-1]
+        lines[-1] = final + "…"
+    return lines or [""]
 
 
 def _dashed_line(

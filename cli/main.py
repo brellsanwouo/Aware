@@ -15,13 +15,13 @@ import typer
 from agents.executor_agent import ExecutorAgentError, ExecutorEvent
 from agents.parser_agent import ParserAgentError, ParserEvent
 from llm.base import LLMError
-from llm.factory import create_llm_client
+from llm.factory import create_llm_client, resolve_llm_model, resolve_llm_provider
 from aware_models.buildspec import BuildSpec
 from runtime.agent_factory import get_executor_agent, get_parser_agent
 from runtime.batch_store import record_batch_incident, validate_batch_identifier
-from runtime.env import env_bool, load_env
+from runtime.env import env_bool, load_env, resolve_max_agents
 from runtime.graph_export import export_causal_graph_png
-from runtime.knowledge_db import maybe_create_knowledge_store, resolve_db_url
+from runtime.knowledge_db import maybe_create_knowledge_store, new_run_id, resolve_db_url
 from runtime.nezha_dataset import NEZHA_CSV_FIELDS, score_diagnosis
 from runtime.output_store import persist_run_artifacts
 from runtime.reporting import build_assessment_output
@@ -136,7 +136,7 @@ def parse_buildspec(
         int | None, typer.Option("--max-attempts", help="Maximum retry attempts.")
     ] = None,
     llm_model: Annotated[
-        str | None, typer.Option("--llm-model", help="OpenAI model override.")
+        str | None, typer.Option("--llm-model", help="LLM model override.")
     ] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Print JSON only.")] = False,
 ) -> None:
@@ -144,17 +144,23 @@ def parse_buildspec(
     if not repo.exists():
         typer.secho(f"Repository path does not exist: {repo}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-    run_id = f"run-{uuid.uuid4().hex[:10]}"
+    run_id = new_run_id()
     event_history: list[dict[str, object]] = []
 
-    resolved_provider = "openai-compatible"
+    resolved_provider = resolve_llm_provider()
     resolved_attempts = int(max_attempts if max_attempts is not None else os.getenv("PARSER_MAX_ATTEMPTS", "5"))
-    resolved_model = llm_model or os.getenv("OPENAI_MODEL")
+    resolved_model = resolve_llm_model(llm_model, resolved_provider)
     enable_reasoning, enable_memory = _runtime_flags()
 
-    parser_agent = get_parser_agent(llm_client=None, max_attempts=resolved_attempts)
-
     try:
+        llm_client = create_llm_client(
+            provider=resolved_provider,
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            openai_base_url=os.getenv("OPENAI_BASE_URL"),
+            openai_model=resolved_model,
+        )
+        parser_agent = get_parser_agent(llm_client=llm_client, max_attempts=resolved_attempts)
+
         def on_event(event: ParserEvent) -> None:
             event_history.append(
                 {
@@ -172,7 +178,7 @@ def parse_buildspec(
             repository_path=str(repo),
             on_event=on_event,
         )
-    except ParserAgentError as exc:
+    except (ParserAgentError, LLMError, ValueError) as exc:
         artifacts = persist_run_artifacts(
             run_id=run_id,
             query=query,
@@ -247,18 +253,13 @@ def execute_assess(
         raise typer.Exit(code=1)
     resolved_version = _set_v3_runtime()
 
-    run_id = f"run-{uuid.uuid4().hex[:10]}"
+    run_id = new_run_id()
     event_history: list[dict[str, object]] = []
-    resolved_provider = "openai-compatible"
-    resolved_model = os.getenv("OPENAI_MODEL")
-    default_max_agents = (
-        int(os.getenv("EXECUTOR_MAX_AGENTS", "5"))
-        if os.getenv("EXECUTOR_MAX_AGENTS", "5").strip().isdigit()
-        else 5
-    )
-    resolved_max_agents = int(max_agents) if max_agents is not None else max(default_max_agents, 8)
+    resolved_provider = resolve_llm_provider()
+    resolved_model = resolve_llm_model(provider=resolved_provider)
+    resolved_max_agents = resolve_max_agents(max_agents)
     enable_reasoning, enable_memory = _runtime_flags()
-    resolved_db_url = resolve_db_url(db_url)
+    resolved_db_url = resolve_db_url(db_url, run_id=run_id)
     knowledge_store = maybe_create_knowledge_store(resolved_db_url) if enable_memory else None
     if knowledge_store is not None:
         knowledge_store.start_run(
@@ -288,7 +289,7 @@ def execute_assess(
             run_id=run_id,
             query="execute_assess",
             source_path=str(repo),
-            db_url=None,
+            db_url=resolved_db_url,
             llm_provider=resolved_provider,
             llm_model=resolved_model,
             status="error",
@@ -341,7 +342,7 @@ def execute_assess(
             run_id=run_id,
             query="execute_assess",
             source_path=str(repo),
-            db_url=None,
+            db_url=resolved_db_url,
             llm_provider=resolved_provider,
             llm_model=resolved_model,
             status="error",
@@ -363,7 +364,7 @@ def execute_assess(
         run_id=run_id,
         query="execute_assess",
         source_path=str(repo),
-        db_url=None,
+        db_url=resolved_db_url,
         llm_provider=resolved_provider,
         llm_model=resolved_model,
         status="success",
@@ -404,7 +405,7 @@ def assess_end_to_end(
         int | None, typer.Option("--max-attempts", help="Maximum parser retry attempts.")
     ] = None,
     llm_model: Annotated[
-        str | None, typer.Option("--llm-model", help="OpenAI model override.")
+        str | None, typer.Option("--llm-model", help="LLM model override.")
     ] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Print JSON only.")] = False,
 ) -> None:
@@ -414,17 +415,12 @@ def assess_end_to_end(
         raise typer.Exit(code=1)
     resolved_version = _set_v3_runtime()
 
-    run_id = f"run-{uuid.uuid4().hex[:10]}"
+    run_id = new_run_id()
     event_history: list[dict[str, object]] = []
-    resolved_provider = "openai-compatible"
-    default_max_agents = (
-        int(os.getenv("EXECUTOR_MAX_AGENTS", "5"))
-        if os.getenv("EXECUTOR_MAX_AGENTS", "5").strip().isdigit()
-        else 5
-    )
-    resolved_max_agents = int(max_agents) if max_agents is not None else max(default_max_agents, 8)
+    resolved_provider = resolve_llm_provider()
+    resolved_max_agents = resolve_max_agents(max_agents)
     enable_reasoning, enable_memory = _runtime_flags()
-    resolved_db_url = resolve_db_url(db_url)
+    resolved_db_url = resolve_db_url(db_url, run_id=run_id)
     knowledge_store = maybe_create_knowledge_store(resolved_db_url) if enable_memory else None
     if knowledge_store is not None:
         knowledge_store.start_run(
@@ -434,9 +430,7 @@ def assess_end_to_end(
             db_url=resolved_db_url,
         )
     resolved_attempts = int(max_attempts if max_attempts is not None else os.getenv("PARSER_MAX_ATTEMPTS", "5"))
-    resolved_model = llm_model or os.getenv("OPENAI_MODEL")
-
-    parser_agent = get_parser_agent(llm_client=None, max_attempts=resolved_attempts)
+    resolved_model = resolve_llm_model(llm_model, resolved_provider)
 
     def on_parser_event(event: ParserEvent) -> None:
         item = {
@@ -479,6 +473,13 @@ def assess_end_to_end(
             )
 
     try:
+        llm_client = create_llm_client(
+            provider=resolved_provider,
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            openai_base_url=os.getenv("OPENAI_BASE_URL"),
+            openai_model=resolved_model,
+        )
+        parser_agent = get_parser_agent(llm_client=llm_client, max_attempts=resolved_attempts)
         parser_result = parser_agent.generate_buildspec(
             user_query=query,
             repository_path=str(repo),
@@ -495,7 +496,7 @@ def assess_end_to_end(
             knowledge_store=knowledge_store,
             on_event=on_executor_event,
         )
-    except (ParserAgentError, ExecutorAgentError) as exc:
+    except (ParserAgentError, ExecutorAgentError, LLMError, ValueError) as exc:
         if knowledge_store is not None:
             knowledge_store.finish_run(
                 run_id=run_id,
@@ -508,7 +509,7 @@ def assess_end_to_end(
             run_id=run_id,
             query=query,
             source_path=str(repo),
-            db_url=None,
+            db_url=resolved_db_url,
             llm_provider=resolved_provider,
             llm_model=resolved_model,
             status="error",
@@ -534,7 +535,7 @@ def assess_end_to_end(
         run_id=run_id,
         query=query,
         source_path=str(repo),
-        db_url=None,
+        db_url=resolved_db_url,
         llm_provider=resolved_provider,
         llm_model=resolved_model,
         status="success",
@@ -594,7 +595,7 @@ def assess_batch(
         int | None, typer.Option("--limit", min=1, help="Run only the first N incidents.")
     ] = None,
     llm_model: Annotated[
-        str | None, typer.Option("--llm-model", help="OpenAI model override.")
+        str | None, typer.Option("--llm-model", help="LLM model override.")
     ] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Print the final batch summary as JSON.")
@@ -622,16 +623,14 @@ def assess_batch(
     batch_root = (Path.cwd() / "output" / "batches" / resolved_batch_id).resolve()
     resolved_results_csv = (results_csv or (batch_root / "results.csv")).expanduser().resolve()
     resolved_graph_dir = (graph_dir or (batch_root / "graphs")).expanduser().resolve()
-    default_agents = int(os.getenv("EXECUTOR_MAX_AGENTS", "5")) if os.getenv("EXECUTOR_MAX_AGENTS", "5").isdigit() else 5
-    resolved_max_agents = int(max_agents) if max_agents is not None else max(default_agents, 8)
+    resolved_max_agents = resolve_max_agents(max_agents)
     resolved_attempts = int(max_attempts if max_attempts is not None else os.getenv("PARSER_MAX_ATTEMPTS", "5"))
-    resolved_model = llm_model or os.getenv("OPENAI_MODEL")
-    resolved_db_url = resolve_db_url(db_url)
+    resolved_provider = resolve_llm_provider()
+    resolved_model = resolve_llm_model(llm_model, resolved_provider)
     enable_reasoning, enable_memory = _runtime_flags()
-    knowledge_store = maybe_create_knowledge_store(resolved_db_url) if enable_memory else None
     try:
         llm_client = create_llm_client(
-            provider="openai-compatible",
+            provider=resolved_provider,
             openai_api_key=os.getenv("OPENAI_API_KEY"),
             openai_base_url=os.getenv("OPENAI_BASE_URL"),
             openai_model=resolved_model,
@@ -650,7 +649,9 @@ def assess_batch(
         )
     for index, problem in enumerate(problems, start=1):
         problem_id = validate_batch_identifier(str(problem["problem_id"]), "problem_id")
-        run_id = f"run-{uuid.uuid4().hex[:10]}"
+        run_id = new_run_id()
+        resolved_db_url = resolve_db_url(db_url, run_id=run_id)
+        knowledge_store = maybe_create_knowledge_store(resolved_db_url) if enable_memory else None
         source_path = _resolve_problem_source(problem, problems_csv, repo)
         query = _problem_query(problem)
         profile = _problem_profile(problem_id)
@@ -725,7 +726,7 @@ def assess_batch(
                 query=query,
                 source_path=str(source_path),
                 db_url=resolved_db_url,
-                llm_provider="openai-compatible",
+                llm_provider=resolved_provider,
                 llm_model=resolved_model,
                 status="success",
                 events=events,
@@ -733,10 +734,11 @@ def assess_batch(
                 error_message=None,
             )
             combined_payload["artifacts"] = artifacts
-            if executor_result.causal_graph is not None and executor_result.causal_graph.nodes:
+            reported_graph = assessment_output.get("causal_graph", {})
+            if isinstance(reported_graph, dict) and reported_graph.get("nodes"):
                 graph_path = str(
                     export_causal_graph_png(
-                        executor_result.causal_graph,
+                        reported_graph,
                         resolved_graph_dir / f"{problem_id}-causal-graph.png",
                     )
                 )
@@ -758,7 +760,7 @@ def assess_batch(
                 query=query,
                 source_path=str(source_path),
                 db_url=resolved_db_url,
-                llm_provider="openai-compatible",
+                llm_provider=resolved_provider,
                 llm_model=resolved_model,
                 status="error",
                 events=events,

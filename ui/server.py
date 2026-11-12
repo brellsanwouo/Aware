@@ -17,19 +17,36 @@ from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingRes
 
 from agents.executor_agent import ExecutorAgentError, ExecutorEvent
 from agents.parser_agent import ParserAgentError, ParserEvent
-from llm.factory import create_llm_client
+from llm.base import LLMError
+from llm.factory import create_llm_client, resolve_llm_model, resolve_llm_provider
 from runtime.agent_factory import get_executor_agent, get_parser_agent
 from runtime.batch_store import (
     batch_directory,
     incident_log_path,
     record_batch_incident,
 )
-from runtime.env import env_bool, load_env
-from runtime.knowledge_db import maybe_create_knowledge_store, resolve_db_url
+from runtime.env import env_bool, load_env, refresh_env, resolve_max_agents
+from runtime.knowledge_db import maybe_create_knowledge_store, new_run_id, resolve_db_url
 from runtime.output_store import persist_run_artifacts
 from runtime.nezha_dataset import build_nezha_problems, discover_nezha_root, problems_to_csv
 from runtime.openrca_dataset import build_openrca_problems, openrca_problems_to_csv
 from runtime.reporting import build_assessment_output
+
+
+def _catalogue_root(dataset: str, telemetry_path: Path) -> Path:
+    """Locate incident labels above a selected telemetry subdirectory."""
+    candidate = telemetry_path.resolve()
+    for parent in (candidate, *candidate.parents):
+        if dataset == "nezha" and (parent / "rca_data").is_dir():
+            return parent
+        if dataset in {"openrca_bank", "openrca_telecom"}:
+            expected = dataset.removeprefix("openrca_")
+            if parent.name.lower() == expected and (parent / "record.csv").is_file():
+                return parent
+        if dataset == "openrca_market" and parent.name.lower() == "market":
+            if len(list(parent.glob("cloudbed-*/record.csv"))) == 2:
+                return parent
+    return candidate
 
 
 def create_app() -> FastAPI:
@@ -50,12 +67,13 @@ def create_app() -> FastAPI:
 
     @app.get("/api/config")
     def config() -> dict[str, str]:
+        refresh_env()
         project_root = Path(__file__).resolve().parent.parent
         nezha_extracted = project_root / "data" / "Nezha" / "Nezha-v0.1"
         nezha_case = project_root / "data" / "Nezha" / "cases" / "train-ticket-2023-01-30-1151"
         openrca_root = project_root / "data" / "Openrca"
         openrca_bank = openrca_root / "Bank-003" / "Bank"
-        openrca_market = openrca_root / "Market-002" / "Market" / "cloudbed-1"
+        openrca_market = openrca_root / "Market-002" / "Market"
         openrca_telecom = openrca_root / "Telecom-001" / "Telecom"
         try:
             nezha_root = discover_nezha_root(nezha_extracted) if nezha_extracted.is_dir() else None
@@ -67,9 +85,11 @@ def create_app() -> FastAPI:
             "openrca_bank_path": str(openrca_bank if openrca_bank.is_dir() else ""),
             "openrca_market_path": str(openrca_market if openrca_market.is_dir() else ""),
             "openrca_telecom_path": str(openrca_telecom if openrca_telecom.is_dir() else ""),
-            "openai_model": os.getenv("OPENAI_MODEL", "gpt-5-mini"),
-            "executor_max_agents": os.getenv("EXECUTOR_MAX_AGENTS", ""),
-            "parser_llm_provider": "openai-compatible",
+            "openai_model": resolve_llm_model() or "",
+            "llm_model": resolve_llm_model() or "",
+            "llm_provider": resolve_llm_provider(),
+            "executor_max_agents": str(resolve_max_agents()),
+            "parser_llm_provider": resolve_llm_provider(),
             "aware_enable_reasoning": "true" if env_bool("AWARE_ENABLE_REASONING", True) else "false",
             "aware_enable_memory": "true" if env_bool("AWARE_ENABLE_MEMORY", True) else "false",
             "rca_version": rca_version,
@@ -121,6 +141,24 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/api/datasets/{dataset}/incidents")
+    def dataset_incidents(dataset: str, source_path: str = Query(...)) -> dict[str, object]:
+        """Prepare a batch catalogue directly from the selected telemetry directory."""
+        selected_source = Path(source_path.strip()).expanduser()
+        if not source_path.strip() or not selected_source.is_dir():
+            raise HTTPException(status_code=400, detail="Select an existing telemetry directory.")
+        catalogue_source = _catalogue_root(dataset, selected_source)
+        try:
+            if dataset == "nezha":
+                incidents = build_nezha_problems(catalogue_source)
+            elif dataset in {"openrca_bank", "openrca_market", "openrca_telecom"}:
+                incidents = build_openrca_problems(catalogue_source, dataset.removeprefix("openrca_"))
+            else:
+                raise HTTPException(status_code=404, detail=f"Unknown dataset: {dataset}")
+        except (OSError, ValueError, csv.Error, json.JSONDecodeError, zipfile.BadZipFile) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"dataset": dataset, "count": len(incidents), "incidents": incidents}
+
     @app.get("/api/batches/{batch_id}")
     def batch_manifest(batch_id: str) -> FileResponse:
         try:
@@ -161,6 +199,7 @@ def create_app() -> FastAPI:
         batch_id: str | None = Query(None, pattern=r"^[A-Za-z0-9_.-]{1,120}$"),
         problem_id: str | None = Query(None, pattern=r"^[A-Za-z0-9_.-]{1,120}$"),
     ) -> StreamingResponse:
+        refresh_env()
         selected_source = (source_path or repo or "").strip()
         if not selected_source:
             raise HTTPException(status_code=400, detail="source_path (or repo) is required.")
@@ -169,7 +208,10 @@ def create_app() -> FastAPI:
         if not repo_path.exists():
             raise HTTPException(status_code=400, detail=f"Repository path does not exist: {selected_source}")
 
-        run_id = f"run-{uuid.uuid4().hex[:10]}"
+        run_id = new_run_id()
+        resolved_provider = resolve_llm_provider()
+        resolved_model = resolve_llm_model(llm_model, resolved_provider)
+        resolved_max_agents = resolve_max_agents(max_agents)
         event_queue: queue.Queue[dict[str, object]] = queue.Queue()
         done = threading.Event()
         result_holder: dict[str, object] = {}
@@ -177,7 +219,7 @@ def create_app() -> FastAPI:
         event_lock = threading.Lock()
         enable_reasoning = env_bool("AWARE_ENABLE_REASONING", True)
         enable_memory = env_bool("AWARE_ENABLE_MEMORY", True)
-        resolved_db_url = resolve_db_url(db_url)
+        resolved_db_url = resolve_db_url(db_url, run_id=run_id)
         knowledge_store = maybe_create_knowledge_store(resolved_db_url) if enable_memory else None
         if knowledge_store is not None:
             knowledge_store.start_run(
@@ -293,16 +335,7 @@ def create_app() -> FastAPI:
             }
 
         def worker() -> None:
-            resolved_provider = "openai-compatible"
-            resolved_model = llm_model or os.getenv("OPENAI_MODEL")
             resolved_attempts = int(max_attempts if max_attempts is not None else os.getenv("PARSER_MAX_ATTEMPTS", "5"))
-            configured_agent_budget = os.getenv("EXECUTOR_MAX_AGENTS", "").strip()
-            default_max_agents = (
-                int(configured_agent_budget) if configured_agent_budget.isdigit() else None
-            )
-            if max_agents is None:
-                default_max_agents = max(default_max_agents or 0, 8)
-            resolved_max_agents = int(max_agents) if max_agents is not None else default_max_agents
             try:
                 push_event("System", "UI", "status", f"Starting Assess run... ({run_id})")
                 if batch_id and problem_id:
@@ -332,7 +365,7 @@ def create_app() -> FastAPI:
                     "status",
                     (
                         "Resolved max agents: "
-                        f"{resolved_max_agents if resolved_max_agents is not None else 'unlimited'}"
+                        f"{resolved_max_agents}"
                     ),
                 )
                 push_event(
@@ -340,14 +373,20 @@ def create_app() -> FastAPI:
                     "UI",
                     "status",
                     (
-                        "Env check: OPENAI_API_KEY="
-                        f"{'present' if bool(os.getenv('OPENAI_API_KEY')) else 'missing'}; "
+                        f"Env check: {'OLLAMA_API_KEY' if resolved_provider == 'ollama-cloud' else 'OPENAI_API_KEY'}="
+                        f"{'present' if bool(os.getenv('OLLAMA_API_KEY' if resolved_provider == 'ollama-cloud' else 'OPENAI_API_KEY')) else 'missing'}; "
                         f"loaded_env_files={', '.join(loaded_env_files) or 'none'}"
                     ),
                 )
 
+                llm_client = create_llm_client(
+                    provider=resolved_provider,
+                    openai_api_key=os.getenv("OPENAI_API_KEY"),
+                    openai_base_url=os.getenv("OPENAI_BASE_URL"),
+                    openai_model=resolved_model,
+                )
                 parser_agent = get_parser_agent(
-                    llm_client=None,
+                    llm_client=llm_client,
                     max_attempts=resolved_attempts,
                 )
                 push_event("System", "UI", "status", f"{parser_agent.name} ready (persistent runtime agent).")
@@ -396,7 +435,7 @@ def create_app() -> FastAPI:
                         run_id=run_id,
                         query=query,
                         source_path=str(repo_path),
-                        db_url=db_url,
+                        db_url=resolved_db_url,
                         llm_provider=resolved_provider,
                         llm_model=resolved_model,
                         status="success",
@@ -454,7 +493,7 @@ def create_app() -> FastAPI:
                     run_id=run_id,
                     query=query,
                     source_path=str(repo_path),
-                    db_url=db_url,
+                    db_url=resolved_db_url,
                     llm_provider=resolved_provider,
                     llm_model=resolved_model,
                     status="success",
@@ -478,7 +517,7 @@ def create_app() -> FastAPI:
                 if batch_log:
                     result_payload["batch_log"] = batch_log
                 result_holder["result"] = result_payload
-            except (ParserAgentError, ExecutorAgentError) as exc:
+            except (ParserAgentError, ExecutorAgentError, LLMError, ValueError) as exc:
                 result_holder["error"] = str(exc)
                 if knowledge_store is not None:
                     knowledge_store.finish_run(
@@ -494,7 +533,7 @@ def create_app() -> FastAPI:
                     run_id=run_id,
                     query=query,
                     source_path=str(repo_path),
-                    db_url=db_url,
+                    db_url=resolved_db_url,
                     llm_provider=resolved_provider,
                     llm_model=resolved_model,
                     status="error",
@@ -530,7 +569,7 @@ def create_app() -> FastAPI:
                     run_id=run_id,
                     query=query,
                     source_path=str(repo_path),
-                    db_url=db_url,
+                    db_url=resolved_db_url,
                     llm_provider=resolved_provider,
                     llm_model=resolved_model,
                     status="error",
@@ -561,7 +600,7 @@ def create_app() -> FastAPI:
                 "User entered query via UI field 'User Query (Parser Agent)':\n"
                 f"{query}\n"
                 f"source={repo_path}\n"
-                f"db={db_url or 'none'}"
+                f"db={resolved_db_url if enable_memory else 'disabled'}"
             ),
         )
         threading.Thread(target=worker, daemon=True).start()
@@ -573,6 +612,10 @@ def create_app() -> FastAPI:
                     "run_id": run_id,
                     "batch_id": batch_id,
                     "problem_id": problem_id,
+                    "db_url": resolved_db_url if enable_memory else None,
+                    "llm_provider": resolved_provider,
+                    "llm_model": resolved_model,
+                    "max_agents": resolved_max_agents,
                 },
                 ensure_ascii=False,
             ) + "\n\n"
